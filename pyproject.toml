@@ -1,0 +1,9 @@
+[project]
+name = "groww-swing-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+# Pin exact versions when you build the venv (pip freeze > requirements.lock).
+dependencies = ["pandas", "numpy", "growwapi", "pyotp"]
+
+[project.optional-dependencies]
+dev = ["pytest"]

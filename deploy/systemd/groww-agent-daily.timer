@@ -1,0 +1,10 @@
+[Unit]
+Description=Run groww-swing-agent after NSE close on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:30:00 Asia/Kolkata
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

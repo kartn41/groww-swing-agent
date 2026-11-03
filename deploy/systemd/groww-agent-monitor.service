@@ -1,0 +1,12 @@
+[Unit]
+Description=groww-swing-agent LIVE GTT monitor (refuses to run unless GROWW_MODE=LIVE)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python -m app.run monitor
+TimeoutStartSec=300
+NoNewPrivileges=true

@@ -1,0 +1,9 @@
+[Unit]
+Description=LIVE GTT monitor every 15 minutes during market hours (NOT enabled by default)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09..15:00/15:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target
