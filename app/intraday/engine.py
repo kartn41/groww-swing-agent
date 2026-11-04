@@ -1,5 +1,6 @@
 """Process one session bar-by-bar on 5m data (paper MIS-style, long-only ORB)."""
 from __future__ import annotations
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -33,6 +34,10 @@ class SessionResult:
     equity: float = 0.0
     cash: float = 0.0
     benchmark: Optional[float] = None
+    session_start_equity: float = 0.0
+    session_pnl: float = 0.0
+    session_pnl_pct: float = 0.0
+    new_entries: list[dict] = field(default_factory=list)
     skipped: bool = False
 
 
@@ -87,6 +92,7 @@ def process_session(
 
     day_start_equity = ledger.equity_now()
     ledger.set("session_start_equity", day_start_equity)
+    res.session_start_equity = day_start_equity
     trades_today = 0
     if ledger.get("last_intraday_day") != day.isoformat():
         ledger.set("last_intraday_day", day.isoformat())
@@ -207,8 +213,27 @@ def process_session(
             ledger.open_position(day, o, fill, cost)
             ledger.mark(best.symbol, fill)
             trades_today += 1
-            res.fills.append(f"{best.symbol} long {qty} @ {fill:.2f} stop {stop:.2f} target {best.target:.2f}")
-            ledger.event(day, "FILL", best.symbol, f"{qty}@{fill:.2f}")
+            cap_used = fill * qty
+            gross_rr = best.gross_rr
+            pick = {
+                "symbol": best.symbol,
+                "sector": best.sector,
+                "qty": qty,
+                "entry": round(fill, 2),
+                "stop": stop,
+                "target": best.target,
+                "score": best.score,
+                "evidence": list(best.evidence),
+                "invalidation": best.invalidation,
+                "capital_used": round(cap_used, 2),
+                "capital_pct_of_equity": round(100 * cap_used / eq, 2) if eq else 0.0,
+                "gross_rr": round(gross_rr, 2),
+            }
+            res.new_entries.append(pick)
+            res.fills.append(
+                f"{best.symbol} long {qty} @ {fill:.2f} (Rs{cap_used:,.0f} = {pick['capital_pct_of_equity']:.1f}% of equity)"
+            )
+            ledger.event(day, "FILL", best.symbol, json.dumps(pick))
             ledger.set("last_intraday_ts", ts_key)
 
         # mark end of session
@@ -231,4 +256,7 @@ def process_session(
     res.equity = ledger.equity_now()
     res.cash = ledger.getf("cash")
     res.benchmark = bench if not index_full.empty else None
+    res.session_pnl = res.equity - res.session_start_equity
+    if res.session_start_equity > 0:
+        res.session_pnl_pct = res.session_pnl / res.session_start_equity
     return res

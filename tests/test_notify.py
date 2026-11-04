@@ -155,11 +155,35 @@ class TestFormat(unittest.TestCase):
         from app.intraday.engine import SessionResult
 
         led = Ledger(tempfile.mktemp(), 250000)
-        res = SessionResult(date(2026, 10, 23), equity=250500, cash=248000, fills=["TEST long 10 @ 100.00"])
+        res = SessionResult(
+            date(2026, 10, 23),
+            equity=250500,
+            cash=248000,
+            session_start_equity=250000,
+            session_pnl=500,
+            session_pnl_pct=0.002,
+            new_entries=[{
+                "symbol": "TEST",
+                "sector": "IT",
+                "qty": 10,
+                "entry": 100.0,
+                "stop": 98.0,
+                "target": 103.0,
+                "score": 55.0,
+                "evidence": ["ORB above 99.50", "session RS +0.8%"],
+                "invalidation": "close below OR high",
+                "capital_used": 1000.0,
+                "capital_pct_of_equity": 4.0,
+                "gross_rr": 1.5,
+            }],
+        )
         text = format_intraday_session(res, led)
         self.assertIn("PAPER intraday", text)
         self.assertIn("no real orders", text)
-        self.assertIn("Fills this session", text)
+        self.assertIn("Session P&L", text)
+        self.assertIn("Stocks picked", text)
+        self.assertIn("ORB above 99.50", text)
+        self.assertIn("Capital used", text)
 
 
 if __name__ == "__main__":

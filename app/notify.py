@@ -196,61 +196,108 @@ def _intraday_trade_line(t) -> str:
             f"net Rs{t['net']:+,.0f} ({_trade_pct(t):+.2%}) same session/day")
 
 
+def _format_intraday_pick(p: dict) -> list[str]:
+    sym = p.get("symbol", "?")
+    lines = [
+        f"- {sym} ({p.get('sector', '')}): BUY {p.get('qty', 0)} @ {p.get('entry', 0):.2f}, "
+        f"stop {p.get('stop', 0):.2f}, target {p.get('target', 0):.2f}, score {p.get('score', 0):.1f}, "
+        f"R/R {p.get('gross_rr', 0):.2f}",
+        f"  Capital used: Rs{p.get('capital_used', 0):,.0f} ({p.get('capital_pct_of_equity', 0):.1f}% of equity at entry)",
+    ]
+    for e in p.get("evidence") or []:
+        lines.append(f"  Why: {e}")
+    if p.get("invalidation"):
+        lines.append(f"  Invalid if: {p['invalidation']}")
+    if p.get("summary"):
+        lines.append(f"  {p['summary']}")
+    return lines
+
+
 def format_intraday_session(res, ledger, mode: str = "PAPER") -> str:
-    """One intraday session — mirrors swing daily Telegram layout."""
+    """One intraday session — P&L, capital used, picks with reasons (swing-style detail)."""
+    from app.intraday.telegram_ctx import picks_on_day
+
     if res.skipped:
         return f"{mode} intraday {res.d}: no session / no 5m data.\n" + "\n".join(res.notes)
     start = ledger.getf("start_capital")
     invested = res.equity - res.cash
+    sess_start = getattr(res, "session_start_equity", None) or ledger.getf("session_start_equity")
+    sess_pnl = getattr(res, "session_pnl", res.equity - sess_start)
+    sess_pct = getattr(res, "session_pnl_pct", sess_pnl / sess_start if sess_start else 0.0)
     L = [
         f"{mode} intraday report {res.d}" + (" (no real orders)" if mode == "PAPER" else ""),
         "Strategy: ORB long-only, 5m bars, MIS-style paper",
-        f"Equity Rs{res.equity:,.0f} ({res.equity / start - 1:+.2%}) | Cash Rs{res.cash:,.0f}",
-        f"Capital used: Rs{invested:,.0f} invested ({_share(invested, res.equity)}), "
+        f"Session P&L: Rs{sess_pnl:+,.0f} ({sess_pct:+.2%} on Rs{sess_start:,.0f} at open)",
+        f"Equity Rs{res.equity:,.0f} ({res.equity / start - 1:+.2%} since start Rs{start:,.0f}) | Cash Rs{res.cash:,.0f}",
+        f"Capital in market now: Rs{invested:,.0f} ({_share(invested, res.equity)}), "
         f"cash {_share(res.cash, res.equity)}",
     ]
     if res.benchmark:
         L.append(f"NIFTY close (5m): {res.benchmark:.2f}")
-    if res.fills:
-        L += ["Fills this session:"] + [f"- {x}" for x in res.fills]
+
+    picks = list(getattr(res, "new_entries", None) or []) or picks_on_day(ledger, res.d)
+    if picks:
+        L.append("Stocks picked (paper fills):")
+        for p in picks:
+            L += _format_intraday_pick(p)
+    elif not res.fills:
+        L.append("No stock picked this session (NO TRADE is valid).")
+
     if res.exits:
         L += ["Exits this session:"] + [f"- {x}" for x in res.exits]
     closed_today = [t for t in ledger.trades() if t["exit_date"] == res.d.isoformat()]
     if closed_today:
-        L.append("Closed today (after costs):")
-        L += [f"- {t['symbol']}: {_intraday_trade_line(t)}" for t in closed_today]
+        L.append("Realized today (after costs):")
+        for t in closed_today:
+            L.append(f"- {t['symbol']}: {_intraday_trade_line(t)}")
     pos = ledger.positions()
     L.append(f"Open positions: {len(pos)} (expect 0 after EOD flat)")
     for p in pos:
         value = p["qty"] * p["last_close"]
         move = p["last_close"] / p["entry"] - 1
-        L.append(f"- {p['symbol']} {p['qty']} @ {p['entry']:.2f}, close {p['last_close']:.2f} ({move:+.2%}), "
-                 f"value Rs{value:,.0f}, stop {p['stop']:.2f}")
+        u = (p["last_close"] - p["entry"]) * p["qty"]
+        L.append(
+            f"- {p['symbol']} {p['qty']} @ {p['entry']:.2f}, close {p['last_close']:.2f} ({move:+.2%}, "
+            f"unrealized Rs{u:+,.0f}), value Rs{value:,.0f} = {_share(value, res.equity)} of equity, stop {p['stop']:.2f}"
+        )
     trades = ledger.trades()
     if trades:
         L += _closed_stats(trades, start)
-    if not res.fills and not res.exits and not closed_today:
-        L.append("No trades this session (NO TRADE is valid).")
-    if res.rejections:
-        L.append(f"Setups rejected on last scan: {len(res.rejections)} symbols")
+    if res.rejections and not picks:
+        top = sorted(res.rejections.items(), key=lambda x: x[0])[:8]
+        L.append("Sample rejections (no qualifying ORB at last bar):")
+        for sym, why in top:
+            L.append(f"- {sym}: {why[:120]}")
     L += [f"Note: {n}" for n in res.notes[:3]]
     return "\n".join(L)
 
 
 def format_intraday_backtest(ledger, start: date, end: date, sessions: int, skipped: int,
                              last_res=None, mode: str = "PAPER") -> str:
-    """Multi-day intraday backtest summary + optional last session detail."""
+    """Multi-day backtest: summary, every trade P&L %, every pick with reasons."""
+    from app.intraday.telegram_ctx import picks_between
     from app.paper.report import summary as ledger_summary
 
     start_cap = ledger.getf("start_capital")
     eq_rows = ledger.con.execute("SELECT equity FROM equity ORDER BY d").fetchall()
     final = eq_rows[-1]["equity"] if eq_rows else start_cap
+    trades = ledger.trades()
     L = [
         f"{mode} intraday BACKTEST {start} to {end} (no real orders)",
         f"Sessions run: {sessions}, skipped (no data): {skipped}",
         ledger_summary(ledger),
         f"Final equity Rs{final:,.0f} ({final / start_cap - 1:+.2%} on Rs{start_cap:,.0f} start)",
     ]
+    if trades:
+        L.append(f"All closed trades ({len(trades)}):")
+        for t in trades:
+            L.append(f"- {t['exit_date']} {t['symbol']}: {_intraday_trade_line(t)}")
+    picks = picks_between(ledger, start, end)
+    if picks:
+        L.append(f"All picks with reasons ({len(picks)}):")
+        for d, p in picks:
+            L.append(f"[{d}]")
+            L += _format_intraday_pick(p)
     if last_res is not None and not last_res.skipped:
-        L += ["", "--- Last session ---", format_intraday_session(last_res, ledger, mode)]
+        L += ["", "--- Last session detail ---", format_intraday_session(last_res, ledger, mode)]
     return "\n".join(L)

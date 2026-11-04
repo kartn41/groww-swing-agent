@@ -622,7 +622,8 @@ def _run_intraday_days(
         print(f"{d}: equity {res.equity:,.0f} fills={len(res.fills)} exits={len(res.exits)}")
         if len(days) == 1:
             print(text)
-        if notifier is not None and telegram and not backtest and len(days) == 1:
+        send_each = os.environ.get("INTRADAY_TELEGRAM_EACH_SESSION", "").lower() in ("1", "true", "yes")
+        if notifier is not None and telegram and (send_each or (not backtest and len(days) == 1)):
             if not notifier.send(format_intraday_session(res, ledger, mode)):
                 log.warning("intraday Telegram message was not delivered (report file may still be saved)")
     if backtest and days:
