@@ -32,6 +32,7 @@ class IntradayConfig:
     min_risk_pct: float = 0.2             # stop distance limits, % of entry
     max_risk_pct: float = 1.2
     max_chase_pct: float = 0.3            # skip if next open is this far above the signal close
+    slippage_bps: float = 10.0            # per side; conservative for NIFTY 50 names
 
     # Risk
     risk_per_trade_pct: float = 0.25
@@ -57,6 +58,7 @@ ENV_OVERRIDES = {
     "INTRADAY_DAILY_LOSS_PCT": ("daily_loss_limit_pct", float),
     "INTRADAY_TARGET_R": ("target_r", float),
     "INTRADAY_BREAKEVEN_R": ("breakeven_at_r", float),
+    "INTRADAY_SLIPPAGE_BPS": ("slippage_bps", float),
     "INTRADAY_MIN_SCORE": ("min_score", float),
     "INTRADAY_MIN_RS_PCT": ("min_rs_pct", float),
     "INTRADAY_VOLUME_MULT": ("volume_mult", float),

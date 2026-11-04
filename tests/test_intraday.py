@@ -131,10 +131,14 @@ class EngineTests(unittest.TestCase):
         self.assertAlmostEqual(res.equity, 250_000 + trades[0]["net"], places=2)
         self.assertGreater(res.equity, 250_000 * 0.99)
 
-    def test_fill_at_next_bar_open(self):
-        _, led = _run(rally)
+    def test_fill_at_next_bar_open_and_target_from_fill(self):
+        res, led = _run(rally)
         t = led.trades()[0]
-        self.assertAlmostEqual(t["entry"], 101.5 * 1.001, places=2)
+        fill = 101.5 * 1.001
+        self.assertAlmostEqual(t["entry"], fill, places=2)
+        pick = res.new_entries[0]
+        self.assertAlmostEqual(pick["target"], fill + CFG.target_r * (fill - pick["stop"]), places=1)
+        self.assertAlmostEqual(pick["gross_rr"], CFG.target_r, places=1)
         self.assertEqual(t["reason"], "INTRADAY_TARGET")
         self.assertGreater(t["net"], 0)
 

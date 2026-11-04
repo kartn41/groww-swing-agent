@@ -52,7 +52,8 @@ def _settings_lines(cfg: IntradayConfig) -> list[str]:
         f"daily loss limit {cfg.daily_loss_limit_pct}%",
         f"- Filters: OR width {cfg.min_or_pct}-{cfg.max_or_pct}%, volume {cfg.volume_mult}x, RS {cfg.min_rs_pct}%, "
         f"VWAP {cfg.require_vwap}, NIFTY filter {cfg.require_index_green}, min score {cfg.min_score}",
-        f"- Exits: target {cfg.target_r}R, breakeven at {cfg.breakeven_at_r}R, stop {cfg.min_risk_pct}-{cfg.max_risk_pct}%",
+        f"- Exits: target {cfg.target_r}R from the fill, breakeven at {cfg.breakeven_at_r}R, "
+        f"stop {cfg.min_risk_pct}-{cfg.max_risk_pct}%; slippage {cfg.slippage_bps:g} bps per side",
     ]
 
 

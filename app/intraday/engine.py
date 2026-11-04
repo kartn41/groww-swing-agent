@@ -63,8 +63,8 @@ def size_position(equity: float, cash: float, entry: float, stop: float, cfg: In
     return max(qty, 0)
 
 
-def _sell(day: date, ledger: Ledger, p, price: float, reason: str, settings: Settings, res: SessionResult) -> float:
-    px = price * (1 - settings.risk.slippage_bps / 10_000)
+def _sell(day: date, ledger: Ledger, p, price: float, reason: str, slip: float, res: SessionResult) -> float:
+    px = price * (1 - slip)
     sell_cost = intraday_charges(px * p["qty"], "SELL")
     net = ledger.close_position(day, p, px, reason, sell_cost)
     ledger.set("cash", ledger.getf("cash") + px * p["qty"] - sell_cost)
@@ -129,7 +129,7 @@ def process_session(day: date, ledger: Ledger, store: IntradayStore, universe: l
 
 def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icfg: IntradayConfig,
          res: SessionResult) -> None:
-    slip = settings.risk.slippage_bps / 10_000
+    slip = icfg.slippage_bps / 10_000
     start_eq = res.session_start_equity
     pending: Optional[dict] = None
     init_risk: dict[str, float] = {}
@@ -142,7 +142,7 @@ def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icf
 
         # 1. fill the signal from the previous bar at this bar's open
         if pending is not None:
-            s, qty = pending["setup"], pending["qty"]
+            s, qty, pending_eq = pending["setup"], pending["qty"], pending["equity"]
             pending = None
             b = _bar(frames[s.symbol], ts)
             if b is None:
@@ -153,11 +153,16 @@ def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icf
                 res.notes.append(f"{s.symbol}: opened {b.open:.2f} at/below stop; entry skipped")
             else:
                 fill = b.open * (1 + slip)
-                qty = min(qty, int(ledger.getf("cash") * 0.99 // fill))
-                if qty >= 1:
-                    _open(day, ledger, s, qty, fill, res)
-                    init_risk[s.symbol] = fill - s.stop
-                    trades += 1
+                risk = fill - s.stop
+                if risk / fill * 100 > icfg.max_risk_pct:
+                    res.notes.append(f"{s.symbol}: stop {risk / fill:.2%} below the fill, too wide; entry skipped")
+                else:
+                    target = round(fill + icfg.target_r * risk, 2)
+                    qty = min(qty, size_position(pending_eq, ledger.getf("cash"), fill, s.stop, icfg))
+                    if qty >= 1:
+                        _open(day, ledger, s, qty, fill, target, res)
+                        init_risk[s.symbol] = risk
+                        trades += 1
 
         # 2. manage open positions on this bar
         for p in ledger.positions():
@@ -165,7 +170,7 @@ def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icf
             if b is None:
                 continue
             if t >= icfg.flat_by:
-                net = _sell(day, ledger, p, b.open, "INTRADAY_EOD", settings, res)
+                net = _sell(day, ledger, p, b.open, "INTRADAY_EOD", slip, res)
             else:
                 reason, px = exit_check(b, p["stop"], p["target"], entry_day=False)
                 if reason is None:
@@ -178,7 +183,7 @@ def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icf
                     continue
                 if reason == "STOP" and p["symbol"] in at_breakeven:
                     reason = "BREAKEVEN"
-                net = _sell(day, ledger, p, px, f"INTRADAY_{reason}", settings, res)
+                net = _sell(day, ledger, p, px, f"INTRADAY_{reason}", slip, res)
             if net < 0 and icfg.stop_after_loss and not halted:
                 halted = "stopped for the day after a losing trade"
 
@@ -223,22 +228,22 @@ def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icf
     for p in ledger.positions():
         df = frames[p["symbol"]]
         upto = df.loc[:last_ts]
-        _sell(day, ledger, p, float(upto["close"].iloc[-1]), "INTRADAY_EOD_LAST_BAR", settings, res)
+        _sell(day, ledger, p, float(upto["close"].iloc[-1]), "INTRADAY_EOD_LAST_BAR", slip, res)
 
 
-def _open(day: date, ledger: Ledger, s, qty: int, fill: float, res: SessionResult) -> None:
+def _open(day: date, ledger: Ledger, s, qty: int, fill: float, target: float, res: SessionResult) -> None:
     eq = ledger.equity_now()
     buy_cost = intraday_charges(fill * qty, "BUY")
     ledger.set("cash", ledger.getf("cash") - fill * qty - buy_cost)
     ledger.open_position(day, {"symbol": s.symbol, "sector": s.sector, "qty": qty, "stop": s.stop,
-                               "target": s.target, "strategy": ORB_NAME, "regime": "INTRADAY"}, fill, buy_cost)
+                               "target": target, "strategy": ORB_NAME, "regime": "INTRADAY"}, fill, buy_cost)
     cap_used = fill * qty
     pick = {
         "symbol": s.symbol, "sector": s.sector, "qty": qty, "entry": round(fill, 2), "stop": s.stop,
-        "target": s.target, "score": s.score, "evidence": list(s.evidence), "invalidation": s.invalidation,
+        "target": target, "score": s.score, "evidence": list(s.evidence), "invalidation": s.invalidation,
         "capital_used": round(cap_used, 2),
         "capital_pct_of_equity": round(100 * cap_used / eq, 2) if eq else 0.0,
-        "gross_rr": round((s.target - fill) / (fill - s.stop), 2) if fill > s.stop else 0.0,
+        "gross_rr": round((target - fill) / (fill - s.stop), 2),
     }
     res.new_entries.append(pick)
     res.fills.append(f"{s.symbol} long {qty} @ {fill:.2f} (Rs{cap_used:,.0f} = {pick['capital_pct_of_equity']:.1f}% of equity)")
