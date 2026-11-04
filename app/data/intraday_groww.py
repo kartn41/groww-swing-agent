@@ -1,18 +1,32 @@
 """Groww 5-minute historical candles (same API as daily, different interval + parser)."""
 from __future__ import annotations
 import math
+import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.data.groww_source import GrowwCandleSource, FatalDataError, MalformedResponse, RateLimited, TransientFailure, classify
 
 IST = ZoneInfo("Asia/Kolkata")
+# growwapi >= current PyPI uses GrowwAPI.CANDLE_INTERVAL_MIN_5 == "5minute"
 FIVE_MIN_INTERVAL_NAMES = (
+    "CANDLE_INTERVAL_MIN_5",
     "CANDLE_INTERVAL_5_MINUTE",
     "CANDLE_INTERVAL_FIVE_MINUTE",
     "CANDLE_INTERVAL_5MIN",
     "CANDLE_INTERVAL_I5",
 )
+
+
+def resolve_five_min_interval(groww) -> str:
+    """Return candle_interval string for get_historical_candles."""
+    override = (os.environ.get("INTRADAY_CANDLE_INTERVAL") or "").strip()
+    if override:
+        return override
+    for name in FIVE_MIN_INTERVAL_NAMES:
+        if hasattr(groww, name):
+            return getattr(groww, name)
+    return "5minute"
 
 
 def parse_intraday_candles(resp: dict, skipped: list | None = None) -> list[tuple]:
@@ -57,9 +71,7 @@ def _num(x):
 class GrowwIntradaySource(GrowwCandleSource):
     def __init__(self, groww, **kw):
         super().__init__(groww, **kw)
-        self.interval = next((getattr(groww, n) for n in FIVE_MIN_INTERVAL_NAMES if hasattr(groww, n)), None)
-        if self.interval is None:
-            raise RuntimeError(f"growwapi has none of {FIVE_MIN_INTERVAL_NAMES}; check Groww annexures")
+        self.interval = resolve_five_min_interval(groww)
 
     def iter_bars(self, groww_symbol: str, start: date, end: date):
         for s, e, resp in self.iter_raw(groww_symbol, start, end):

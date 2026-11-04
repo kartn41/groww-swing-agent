@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from app.data.intraday_groww import parse_intraday_candles
+from app.data.intraday_groww import parse_intraday_candles, resolve_five_min_interval
 from app.data.intraday_store import IntradayStore
 from app.intraday.engine import INDEX_SYMBOL, gsym, process_session
 from app.intraday.orb import evaluate_orb, opening_range
@@ -47,6 +47,12 @@ def _seed_orb_day(store: IntradayStore, day: date) -> None:
 
 
 class IntradayParseTests(unittest.TestCase):
+    def test_five_min_interval_new_growwapi(self):
+        class G:
+            CANDLE_INTERVAL_MIN_5 = "5minute"
+
+        self.assertEqual(resolve_five_min_interval(G()), "5minute")
+
     def test_parse_epoch(self):
         rows = parse_intraday_candles({"candles": [[1700000000, 10, 11, 9, 10.5, 100]]})
         self.assertEqual(len(rows), 1)
