@@ -582,6 +582,7 @@ def _run_intraday_days(
     backtest: bool,
     notifier=None,
     telegram: bool = True,
+    holdout: date | None = None,
 ) -> tuple[int, object | None]:
     """Run ORB paper sessions. Returns (exit_code, last SessionResult)."""
     from app.data.intraday_store import IntradayStore
@@ -629,13 +630,12 @@ def _run_intraday_days(
     if backtest and days:
         a, b = days[0], days[-1]
         path = REPORTS / f"intraday_backtest_{a}_{b}.md"
-        path.write_text(backtest_report(ledger, a, b, ran, skipped))
+        path.write_text(backtest_report(ledger, a, b, ran, skipped, holdout))
         print(f"backtest report: {path}")
-        from app.paper.report import summary as ledger_summary
-
-        print(ledger_summary(ledger))
+        msg = format_intraday_backtest(ledger, a, b, ran, skipped, None, mode, holdout)
+        print(msg)
         if notifier is not None and telegram:
-            msg = format_intraday_backtest(ledger, a, b, ran, skipped, last_res, mode)
+            msg = format_intraday_backtest(ledger, a, b, ran, skipped, last_res, mode, holdout)
             if not notifier.send(msg):
                 log.warning("intraday backtest Telegram message was not delivered")
     elif len(days) > 1 and notifier is not None and telegram:
@@ -712,9 +712,10 @@ def cmd_intraday_backtest(args) -> int:
     cap = _intraday_capital(args.capital)
     telegram = not getattr(args, "no_telegram", False)
     db = str(DATA_DIR / f"intraday_backtest_{start}_{end}.db")
+    holdout = date.fromisoformat(args.holdout) if args.holdout else None
     rc, _ = _run_intraday_days(
         days, db, cap, settings, fresh=True, write_reports=False, backtest=True,
-        notifier=TelegramNotifier.from_env() if telegram else None, telegram=telegram,
+        notifier=TelegramNotifier.from_env() if telegram else None, telegram=telegram, holdout=holdout,
     )
     print(f"Backtest ledger: {db}")
     return rc
@@ -770,6 +771,7 @@ def main(argv=None) -> int:
     ibt.add_argument("--start", required=True)
     ibt.add_argument("--end")
     ibt.add_argument("--capital", type=float)
+    ibt.add_argument("--holdout", help="report trades from this date separately (out-of-sample check)")
     ibt.add_argument("--no-telegram", action="store_true")
     pp = sub.add_parser("paper")
     g = pp.add_mutually_exclusive_group(required=True)

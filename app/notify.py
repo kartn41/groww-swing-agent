@@ -273,21 +273,31 @@ def format_intraday_session(res, ledger, mode: str = "PAPER") -> str:
 
 
 def format_intraday_backtest(ledger, start: date, end: date, sessions: int, skipped: int,
-                             last_res=None, mode: str = "PAPER") -> str:
-    """Multi-day backtest: summary, every trade P&L %, every pick with reasons."""
+                             last_res=None, mode: str = "PAPER", holdout: Optional[date] = None) -> str:
+    """Multi-day backtest: validation, stats (with holdout split), every trade and pick with reasons."""
+    from app.intraday.stats import accounting_check, benchmark_return, max_drawdown, split_trades, stats_lines, verdict
     from app.intraday.telegram_ctx import picks_between
-    from app.paper.report import summary as ledger_summary
 
     start_cap = ledger.getf("start_capital")
-    eq_rows = ledger.con.execute("SELECT equity FROM equity ORDER BY d").fetchall()
-    final = eq_rows[-1]["equity"] if eq_rows else start_cap
+    final = ledger.equity_now()
     trades = ledger.trades()
+    bench = benchmark_return(ledger)
     L = [
         f"{mode} intraday BACKTEST {start} to {end} (no real orders)",
         f"Sessions run: {sessions}, skipped (no data): {skipped}",
-        ledger_summary(ledger),
-        f"Final equity Rs{final:,.0f} ({final / start_cap - 1:+.2%} on Rs{start_cap:,.0f} start)",
+        f"Final equity Rs{final:,.0f} ({final / start_cap - 1:+.2%} on Rs{start_cap:,.0f} start), "
+        f"max drawdown {max_drawdown(ledger):.2%}",
+        f"NIFTY same days: {bench:+.2%}" if bench is not None else "NIFTY: n/a",
+        f"Accounting check: {accounting_check(ledger)[1]}",
     ]
+    dev, test = split_trades(trades, holdout)
+    if holdout:
+        L += stats_lines(dev, start_cap, f"Development (before {holdout})")
+        L += stats_lines(test, start_cap, f"Holdout ({holdout} onward)")
+    else:
+        L += stats_lines(trades, start_cap, "All trades")
+    flags = verdict(ledger, holdout)
+    L += ["Red flags:"] + ([f"- {f}" for f in flags] or ["- none found (still paper; confirm on more data)"])
     if trades:
         L.append(f"All closed trades ({len(trades)}):")
         for t in trades:

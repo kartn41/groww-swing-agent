@@ -1,12 +1,15 @@
-"""Opening-range breakout (long-only), evaluated on completed 5m bars."""
+"""Opening-range breakout (long-only), decided on the close of a completed 5m bar.
+`bars` / `index_bars` hold the current session only, ending at the signal bar."""
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import time
 import pandas as pd
 
+from app.intraday.config import IntradayConfig
 from app.strategies.common import Rejection, Setup
 
 NAME = "INTRADAY_ORB"
+NO_BREAKOUT = "no breakout"
 
 
 @dataclass
@@ -15,83 +18,116 @@ class OpeningRange:
     low: float
     ready: bool
 
+    @property
+    def mid(self) -> float:
+        return (self.high + self.low) / 2
 
-def opening_range(bars: pd.DataFrame, or_end: time) -> OpeningRange:
-    """OR = all bars with time <= or_end on the session day."""
+
+def opening_range(bars: pd.DataFrame, or_end: time, min_bars: int = 5) -> OpeningRange:
+    """OR = session bars starting before or_end. Not ready until min_bars of them exist."""
     if bars.empty:
         return OpeningRange(0.0, 0.0, False)
-    day = bars.index[-1].date()
-    mask = (bars.index.date == day) & (bars.index.time <= or_end)
-    seg = bars.loc[mask]
-    if seg.empty:
+    seg = bars.loc[bars.index.time < or_end]
+    if len(seg) < min_bars:
         return OpeningRange(0.0, 0.0, False)
     return OpeningRange(float(seg["high"].max()), float(seg["low"].min()), True)
 
 
-def relative_strength(stock: pd.DataFrame, index: pd.DataFrame, n_bars: int = 12) -> float:
-    """Session RS: stock return minus index return over the last n completed bars."""
-    if len(stock) < 2 or index.empty:
-        return 0.0
-    seg = stock.iloc[-min(n_bars, len(stock)) :]
-    idx = index["close"].reindex(seg.index).ffill().bfill()
-    if idx.isna().any():
-        return 0.0
-    s_ret = float(seg["close"].iloc[-1] / seg["close"].iloc[0] - 1)
-    i_ret = float(idx.iloc[-1] / idx.iloc[0] - 1)
-    return s_ret - i_ret
+def session_vwap(bars: pd.DataFrame) -> float | None:
+    vol = bars["volume"]
+    if float(vol.sum()) <= 0:
+        return None
+    typical = (bars["high"] + bars["low"] + bars["close"]) / 3
+    return float((typical * vol).sum() / vol.sum())
 
 
-def evaluate_orb(
-    symbol: str,
-    sector: str,
-    bars: pd.DataFrame,
-    index_bars: pd.DataFrame,
-    or_range: OpeningRange,
-    *,
-    min_gross_rr: float = 1.5,
-    min_rs: float = 0.001,
-    max_extension: float = 0.015,
-) -> Setup | Rejection:
-    if not or_range.ready:
+def session_return(bars: pd.DataFrame) -> float:
+    return float(bars["close"].iloc[-1] / bars["open"].iloc[0] - 1)
+
+
+def index_ok(index_bars: pd.DataFrame, cfg: IntradayConfig) -> tuple[bool, str]:
+    """Long breakouts only when NIFTY is above its open and its opening-range midpoint."""
+    if not cfg.require_index_green:
+        return True, "index filter off"
+    orr = opening_range(index_bars, cfg.or_end)
+    if not orr.ready:
+        return False, "NIFTY opening range not ready"
+    last = float(index_bars["close"].iloc[-1])
+    first_open = float(index_bars["open"].iloc[0])
+    if last < first_open:
+        return False, f"NIFTY below its open ({last / first_open - 1:+.2%})"
+    if last < orr.mid:
+        return False, f"NIFTY below its opening-range midpoint {orr.mid:.2f}"
+    return True, f"NIFTY {last / first_open - 1:+.2%} on the day, above OR midpoint"
+
+
+def evaluate_orb(symbol: str, sector: str, bars: pd.DataFrame, index_bars: pd.DataFrame,
+                 cfg: IntradayConfig) -> Setup | Rejection:
+    orr = opening_range(bars, cfg.or_end)
+    if not orr.ready:
         return Rejection(symbol, "opening range not ready", NAME)
-    if len(bars) < 3:
-        return Rejection(symbol, "insufficient intraday bars", NAME)
+    after_or = bars.loc[bars.index.time >= cfg.or_end]
+    if after_or.empty:
+        return Rejection(symbol, "no bars after the opening range", NAME)
 
     last = bars.iloc[-1]
-    close, high, low, vol = float(last["close"]), float(last["high"]), float(last["low"]), float(last["volume"])
-    if close <= or_range.high:
-        return Rejection(symbol, f"no breakout: close {close:.2f} <= OR high {or_range.high:.2f}", NAME)
-    ext = close / or_range.high - 1
-    if ext > max_extension:
-        return Rejection(symbol, f"extended {ext:.1%} above OR high: not chasing", NAME)
+    o, h, l, c, v = (float(last[k]) for k in ("open", "high", "low", "close", "volume"))
+    if c <= orr.high:
+        return Rejection(symbol, NO_BREAKOUT, NAME)
+    prev_after = after_or.iloc[:-1]
+    if not prev_after.empty and float(prev_after["close"].max()) > orr.high:
+        return Rejection(symbol, "not the first close above OR high (late)", NAME)
 
-    or_seg = bars.loc[(bars.index.date == bars.index[-1].date()) & (bars.index.time <= time(9, 45))]
-    avg_or_vol = float(or_seg["volume"].mean()) if not or_seg.empty else 0.0
-    if avg_or_vol > 0 and vol < 1.2 * avg_or_vol:
-        return Rejection(symbol, f"breakout volume {vol:.0f} < 1.2x OR avg {avg_or_vol:.0f}", NAME)
+    width = (orr.high - orr.low) / orr.low * 100
+    if not cfg.min_or_pct <= width <= cfg.max_or_pct:
+        return Rejection(symbol, f"opening range {width:.2f}% outside {cfg.min_or_pct}-{cfg.max_or_pct}%", NAME)
+    ext = (c / orr.high - 1) * 100
+    if ext > cfg.max_extension_pct:
+        return Rejection(symbol, f"extended {ext:.2f}% above OR high: not chasing", NAME)
+    if c <= o:
+        return Rejection(symbol, "breakout bar is not green", NAME)
+    close_pos = (c - l) / (h - l) if h > l else 1.0
+    if close_pos < cfg.min_close_position:
+        return Rejection(symbol, f"weak close ({close_pos:.0%} of bar range)", NAME)
 
-    rs = relative_strength(bars, index_bars)
-    if rs < min_rs:
-        return Rejection(symbol, f"weak vs NIFTY session ({rs:+.2%})", NAME)
+    prior = bars.iloc[:-1]
+    avg_vol = float(prior["volume"].mean()) if not prior.empty else 0.0
+    vol_x = v / avg_vol if avg_vol > 0 else 0.0
+    if vol_x < cfg.volume_mult:
+        return Rejection(symbol, f"breakout volume {vol_x:.2f}x < {cfg.volume_mult}x session average", NAME)
+    turnover = float((bars["close"] * bars["volume"]).mean())
+    if turnover < cfg.min_bar_turnover:
+        return Rejection(symbol, f"thin: Rs{turnover / 1e5:.0f} lakh per bar", NAME)
 
-    entry = close
-    stop = round(min(or_range.low, low) - 0.05, 2)
-    if stop <= 0 or entry <= stop:
-        return Rejection(symbol, "invalid stop", NAME)
-    risk = entry - stop
-    target = round(entry + min_gross_rr * risk, 2)
-    rr = (target - entry) / risk
-    if rr < min_gross_rr - 1e-6:
-        return Rejection(symbol, f"gross R/R {rr:.2f} < {min_gross_rr}", NAME)
+    vwap = session_vwap(bars)
+    if cfg.require_vwap and vwap is not None and c <= vwap:
+        return Rejection(symbol, f"close {c:.2f} not above VWAP {vwap:.2f}", NAME)
 
-    return Setup(
-        symbol=symbol,
-        sector=sector,
-        entry=entry,
-        stop=stop,
-        target=target,
-        score=50.0 + 100 * rs,
-        evidence=[f"ORB above {or_range.high:.2f}", f"session RS {rs:+.2%}"],
-        invalidation=f"close back below OR high {or_range.high:.2f}",
-        strategy=NAME,
-    )
+    rs = (session_return(bars) - session_return(index_bars)) * 100
+    if rs < cfg.min_rs_pct:
+        return Rejection(symbol, f"relative strength {rs:+.2f}% < {cfg.min_rs_pct}% vs NIFTY", NAME)
+
+    entry = c
+    stop = round(max(orr.mid, l) - 0.0005 * entry, 2)
+    risk_pct = (entry - stop) / entry * 100
+    if risk_pct < cfg.min_risk_pct:
+        return Rejection(symbol, f"stop too tight ({risk_pct:.2f}%)", NAME)
+    if risk_pct > cfg.max_risk_pct:
+        return Rejection(symbol, f"stop too wide ({risk_pct:.2f}% > {cfg.max_risk_pct}%)", NAME)
+    target = round(entry + cfg.target_r * (entry - stop), 2)
+
+    score = round(40 * min(1.0, rs / 1.0) + 30 * min(1.0, (vol_x - 1) / 2) + 30 * close_pos, 1)
+    if score < cfg.min_score:
+        return Rejection(symbol, f"score {score} < {cfg.min_score}", NAME)
+
+    evidence = [
+        f"First close above opening range high {orr.high:.2f} (range {width:.2f}% wide)",
+        f"Breakout volume {vol_x:.1f}x session average, closed at {close_pos:.0%} of the bar",
+        f"Stronger than NIFTY by {rs:+.2f}% since the open",
+    ]
+    if vwap is not None:
+        evidence.append(f"Above VWAP {vwap:.2f}")
+    return Setup(symbol=symbol, sector=sector, entry=entry, stop=stop, target=target, score=score,
+                 evidence=evidence,
+                 invalidation=f"falls back to {stop:.2f} (opening-range midpoint / breakout bar low)",
+                 strategy=NAME)

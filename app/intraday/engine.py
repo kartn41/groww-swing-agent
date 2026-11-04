@@ -1,19 +1,23 @@
-"""Process one session bar-by-bar on 5m data (paper MIS-style, long-only ORB)."""
+"""Process one session bar-by-bar on 5m data (paper MIS-style, long-only ORB).
+
+Bars are labelled by their START time. A signal is decided on the close of bar t and filled at the
+open of bar t+1, so no decision sees the bar it trades on. Inside a bar the stop is assumed to hit
+before the target. The whole session commits atomically."""
 from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date
 from typing import Optional
 import pandas as pd
 
 from app.config import Settings
 from app.data.intraday_store import IntradayStore
 from app.intraday.config import IntradayConfig, load_intraday_config
-from app.intraday.orb import NAME as ORB_NAME, evaluate_orb, opening_range
+from app.intraday.costs import intraday_charges
+from app.intraday.orb import NAME as ORB_NAME, NO_BREAKOUT, evaluate_orb, index_ok
 from app.paper.ledger import Ledger
 from app.paper.simulator import Bar, exit_check
-from app.risk.costs import order_charges
 from app.universe import Constituent
 
 log = logging.getLogger(__name__)
@@ -30,6 +34,7 @@ class SessionResult:
     fills: list[str] = field(default_factory=list)
     exits: list[str] = field(default_factory=list)
     rejections: dict[str, str] = field(default_factory=dict)
+    data_issues: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     equity: float = 0.0
     cash: float = 0.0
@@ -38,38 +43,46 @@ class SessionResult:
     session_pnl: float = 0.0
     session_pnl_pct: float = 0.0
     new_entries: list[dict] = field(default_factory=list)
+    index_blocked: str = ""
     skipped: bool = False
 
 
-def _bar_row(row) -> Bar:
-    return Bar(float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]))
+def _bar(df: pd.DataFrame, ts) -> Optional[Bar]:
+    if ts not in df.index:
+        return None
+    r = df.loc[ts]
+    return Bar(float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]))
 
 
-def _session_bars(store: IntradayStore, day: date) -> list[datetime]:
-    ts = store.session_times(day, INDEX_SYMBOL)
-    if not ts:
-        ts = store.session_times(day, gsym("RELIANCE"))
-    return ts
+def size_position(equity: float, cash: float, entry: float, stop: float, cfg: IntradayConfig) -> int:
+    per_share = entry - stop
+    if per_share <= 0 or entry <= 0:
+        return 0
+    qty = int(equity * cfg.risk_per_trade_pct / 100 // per_share)
+    qty = min(qty, int(equity * cfg.max_position_pct / 100 // entry), int(cash * 0.99 // entry))
+    return max(qty, 0)
 
 
-def _qty(equity: float, entry: float, stop: float, cfg: IntradayConfig) -> int:
-    risk_amt = equity * cfg.risk_per_trade_pct / 100
-    per_share = max(entry - stop, 0.01)
-    q = int(risk_amt // per_share)
-    max_val = equity * 0.95
-    if q * entry > max_val:
-        q = int(max_val // entry)
-    return max(q, 0)
+def _sell(day: date, ledger: Ledger, p, price: float, reason: str, settings: Settings, res: SessionResult) -> float:
+    px = price * (1 - settings.risk.slippage_bps / 10_000)
+    sell_cost = intraday_charges(px * p["qty"], "SELL")
+    net = ledger.close_position(day, p, px, reason, sell_cost)
+    ledger.set("cash", ledger.getf("cash") + px * p["qty"] - sell_cost)
+    res.exits.append(f"{p['symbol']} {reason} @ {px:.2f}, net Rs{net:+,.0f}")
+    ledger.event(day, "EXIT", p["symbol"], res.exits[-1])
+    return net
 
 
-def process_session(
-    day: date,
-    ledger: Ledger,
-    store: IntradayStore,
-    universe: list[Constituent],
-    settings: Settings,
-    icfg: Optional[IntradayConfig] = None,
-) -> SessionResult:
+def _equity(ledger: Ledger, frames: dict, ts) -> float:
+    for p in ledger.positions():
+        b = _bar(frames[p["symbol"]], ts)
+        if b is not None:
+            ledger.mark(p["symbol"], b.close)
+    return ledger.equity_now()
+
+
+def process_session(day: date, ledger: Ledger, store: IntradayStore, universe: list[Constituent],
+                    settings: Settings, icfg: Optional[IntradayConfig] = None) -> SessionResult:
     icfg = icfg or load_intraday_config()
     res = SessionResult(day)
     last = ledger.get("last_processed")
@@ -78,185 +91,155 @@ def process_session(
         res.notes.append(f"{day} already processed (last {last})")
         return res
 
-    times = _session_bars(store, day)
-    if len(times) < 10:
+    index_df = store.load(INDEX_SYMBOL, day=day)
+    if len(index_df) < icfg.min_session_bars:
         res.skipped = True
-        res.notes.append(f"insufficient 5m bars for {day}")
+        res.notes.append(f"NIFTY has {len(index_df)} 5m bars for {day} (< {icfg.min_session_bars}): "
+                         "no session or incomplete data")
         return res
 
-    index_full = store.load(INDEX_SYMBOL, day=day)
-    if index_full.empty:
-        res.skipped = True
-        res.notes.append(f"no index 5m data for {day}")
-        return res
+    frames: dict[str, pd.DataFrame] = {}
+    sectors: dict[str, str] = {}
+    for c in universe:
+        df = store.load(gsym(c.symbol), day=day)
+        if len(df) < icfg.min_session_bars:
+            res.data_issues[c.symbol] = f"{len(df)} bars"
+            continue
+        frames[c.symbol], sectors[c.symbol] = df, c.sector
 
-    day_start_equity = ledger.equity_now()
-    ledger.set("session_start_equity", day_start_equity)
-    res.session_start_equity = day_start_equity
-    trades_today = 0
-    if ledger.get("last_intraday_day") != day.isoformat():
-        ledger.set("last_intraday_day", day.isoformat())
-        ledger.set("last_intraday_ts", "")
-    last_ts_key = ledger.get("last_intraday_ts") or ""
-
-    bench: Optional[float] = None
+    res.session_start_equity = ledger.equity_now()
     try:
-        for ts in times:
-            ts_key = ts.strftime("%Y-%m-%d %H:%M:%S")
-            if last_ts_key and ts_key <= last_ts_key:
-                continue
-
-            t = ts.time()
-            index_upto = index_full.loc[:ts]
-            or_ready = t > icfg.or_end
-
-            # ---- exits ----
-            for p in list(ledger.positions()):
-                sym = p["symbol"]
-                df = store.load(gsym(sym), day=day, end_ts=ts_key)
-                if df.empty or ts not in df.index:
-                    continue
-                bar = _bar_row(df.loc[ts])
-                entry_day = p["entry_date"] == day.isoformat()
-                reason, px = exit_check(bar, p["stop"], p["target"], entry_day=False)
-                if reason and px is not None:
-                    slip = settings.risk.slippage_bps / 10_000
-                    sell = px * (1 - slip)
-                    sc = order_charges(sell * p["qty"], "SELL", settings.costs)
-                    net = ledger.close_position(day, p, sell, f"INTRADAY_{reason}", sc)
-                    res.exits.append(f"{sym} {reason} @ {sell:.2f} net {net:+.0f}")
-                    ledger.event(day, "EXIT", sym, reason)
-                    continue
-                if t >= icfg.flat_by:
-                    slip = settings.risk.slippage_bps / 10_000
-                    sell = bar.close * (1 - slip)
-                    sc = order_charges(sell * p["qty"], "SELL", settings.costs)
-                    net = ledger.close_position(day, p, sell, "INTRADAY_EOD", sc)
-                    res.exits.append(f"{sym} EOD flat @ {sell:.2f} net {net:+.0f}")
-                    ledger.event(day, "EXIT", sym, "EOD")
-
-            # daily loss limit
-            eq = ledger.equity_now()
-            start = ledger.getf("session_start_equity")
-            if start > 0 and (start - eq) / start * 100 >= icfg.daily_loss_limit_pct:
-                res.notes.append("daily loss limit hit; no new entries")
-                ledger.set("last_intraday_ts", ts_key)
-                continue
-
-            # ---- new entries ----
-            if (
-                ledger.positions()
-                or trades_today >= icfg.max_trades_per_day
-                or t < time(9, 50)
-                or t > icfg.entry_cutoff
-                or t >= icfg.flat_by
-                or not or_ready
-            ):
-                ledger.set("last_intraday_ts", ts_key)
-                for p in ledger.positions():
-                    df = store.load(gsym(p["symbol"]), day=day, end_ts=ts_key)
-                    if not df.empty and ts in df.index:
-                        ledger.mark(p["symbol"], float(df.loc[ts]["close"]))
-                continue
-
-            candidates: list = []
-            for c in universe:
-                df = store.load(gsym(c.symbol), day=day, end_ts=ts_key)
-                if df.empty or ts not in df.index:
-                    continue
-                or_rng = opening_range(df, icfg.or_end)
-                out = evaluate_orb(
-                    c.symbol,
-                    c.sector,
-                    df,
-                    index_upto,
-                    or_rng,
-                    min_gross_rr=icfg.min_gross_rr,
-                    max_extension=icfg.max_breakout_extension,
-                )
-                if hasattr(out, "reason"):
-                    res.rejections[c.symbol] = out.reason
-                else:
-                    candidates.append(out)
-
-            if not candidates:
-                ledger.set("last_intraday_ts", ts_key)
-                continue
-
-            best = max(candidates, key=lambda s: s.score)
-            entry = best.entry
-            stop = best.stop
-            qty = _qty(eq, entry, stop, icfg)
-            if qty < 1:
-                res.notes.append(f"{best.symbol}: qty 0 (risk sizing)")
-                ledger.set("last_intraday_ts", ts_key)
-                continue
-
-            slip = settings.risk.slippage_bps / 10_000
-            fill = entry * (1 + slip)
-            cost = order_charges(fill * qty, "BUY", settings.costs)
-            if ledger.getf("cash") < fill * qty + cost:
-                res.notes.append(f"{best.symbol}: insufficient cash")
-                ledger.set("last_intraday_ts", ts_key)
-                continue
-
-            ledger.set("cash", ledger.getf("cash") - fill * qty - cost)
-            o = {
-                "symbol": best.symbol,
-                "sector": best.sector,
-                "qty": qty,
-                "stop": best.stop,
-                "target": best.target,
-                "strategy": ORB_NAME,
-                "regime": "INTRADAY",
-            }
-            ledger.open_position(day, o, fill, cost)
-            ledger.mark(best.symbol, fill)
-            trades_today += 1
-            cap_used = fill * qty
-            gross_rr = best.gross_rr
-            pick = {
-                "symbol": best.symbol,
-                "sector": best.sector,
-                "qty": qty,
-                "entry": round(fill, 2),
-                "stop": stop,
-                "target": best.target,
-                "score": best.score,
-                "evidence": list(best.evidence),
-                "invalidation": best.invalidation,
-                "capital_used": round(cap_used, 2),
-                "capital_pct_of_equity": round(100 * cap_used / eq, 2) if eq else 0.0,
-                "gross_rr": round(gross_rr, 2),
-            }
-            res.new_entries.append(pick)
-            res.fills.append(
-                f"{best.symbol} long {qty} @ {fill:.2f} (Rs{cap_used:,.0f} = {pick['capital_pct_of_equity']:.1f}% of equity)"
-            )
-            ledger.event(day, "FILL", best.symbol, json.dumps(pick))
-            ledger.set("last_intraday_ts", ts_key)
-
-        # mark end of session
-        last_ts = times[-1].strftime("%Y-%m-%d %H:%M:%S")
-        for p in ledger.positions():
-            df = store.load(gsym(p["symbol"]), day=day, end_ts=last_ts)
-            if not df.empty:
-                ledger.mark(p["symbol"], float(df["close"].iloc[-1]))
-        bench = float(index_full["close"].iloc[-1]) if not index_full.empty else None
-        ledger.record_equity(day, bench)
-        peak = max(ledger.getf("peak_equity"), ledger.equity_now())
-        ledger.set("peak_equity", peak)
+        _run(day, ledger, frames, sectors, index_df, settings, icfg, res)
+        res.benchmark = float(index_df["close"].iloc[-1])
+        ledger.record_equity(day, res.benchmark)
+        ledger.set("peak_equity", max(ledger.getf("peak_equity"), ledger.equity_now()))
         ledger.set("prev_equity", ledger.equity_now())
-        ledger.set("last_processed", day.isoformat())
-        ledger.con.commit()
+        ledger.end_day(day)
     except Exception:
         ledger.con.rollback()
         raise
 
     res.equity = ledger.equity_now()
     res.cash = ledger.getf("cash")
-    res.benchmark = bench if not index_full.empty else None
     res.session_pnl = res.equity - res.session_start_equity
     if res.session_start_equity > 0:
         res.session_pnl_pct = res.session_pnl / res.session_start_equity
     return res
+
+
+def _run(day, ledger: Ledger, frames, sectors, index_df, settings: Settings, icfg: IntradayConfig,
+         res: SessionResult) -> None:
+    slip = settings.risk.slippage_bps / 10_000
+    start_eq = res.session_start_equity
+    pending: Optional[dict] = None
+    init_risk: dict[str, float] = {}
+    at_breakeven: set[str] = set()
+    trades = 0
+    halted = ""
+
+    for ts in index_df.index:
+        t = ts.time()
+
+        # 1. fill the signal from the previous bar at this bar's open
+        if pending is not None:
+            s, qty = pending["setup"], pending["qty"]
+            pending = None
+            b = _bar(frames[s.symbol], ts)
+            if b is None:
+                res.notes.append(f"{s.symbol}: no bar at {t:%H:%M}; entry skipped")
+            elif b.open > s.entry * (1 + icfg.max_chase_pct / 100):
+                res.notes.append(f"{s.symbol}: opened {b.open:.2f}, > {icfg.max_chase_pct}% above signal; not chasing")
+            elif b.open <= s.stop:
+                res.notes.append(f"{s.symbol}: opened {b.open:.2f} at/below stop; entry skipped")
+            else:
+                fill = b.open * (1 + slip)
+                qty = min(qty, int(ledger.getf("cash") * 0.99 // fill))
+                if qty >= 1:
+                    _open(day, ledger, s, qty, fill, res)
+                    init_risk[s.symbol] = fill - s.stop
+                    trades += 1
+
+        # 2. manage open positions on this bar
+        for p in ledger.positions():
+            b = _bar(frames[p["symbol"]], ts)
+            if b is None:
+                continue
+            if t >= icfg.flat_by:
+                net = _sell(day, ledger, p, b.open, "INTRADAY_EOD", settings, res)
+            else:
+                reason, px = exit_check(b, p["stop"], p["target"], entry_day=False)
+                if reason is None:
+                    r = init_risk.get(p["symbol"], 0.0)
+                    if (icfg.breakeven_at_r > 0 and r > 0 and p["symbol"] not in at_breakeven
+                            and b.high >= p["entry"] + icfg.breakeven_at_r * r):
+                        ledger.update_stop(p["symbol"], round(p["entry"], 2))
+                        at_breakeven.add(p["symbol"])
+                        res.notes.append(f"{p['symbol']}: +{icfg.breakeven_at_r:g}R reached, stop moved to entry")
+                    continue
+                if reason == "STOP" and p["symbol"] in at_breakeven:
+                    reason = "BREAKEVEN"
+                net = _sell(day, ledger, p, px, f"INTRADAY_{reason}", settings, res)
+            if net < 0 and icfg.stop_after_loss and not halted:
+                halted = "stopped for the day after a losing trade"
+
+        # 3. daily loss limit on marked equity
+        eq = _equity(ledger, frames, ts)
+        if not halted and start_eq > 0 and (start_eq - eq) / start_eq * 100 >= icfg.daily_loss_limit_pct:
+            halted = f"daily loss limit {icfg.daily_loss_limit_pct}% hit"
+
+        # 4. new signal on this bar's close, filled next bar
+        if (halted or ledger.positions() or trades >= icfg.max_trades_per_day
+                or t < icfg.or_end or t > icfg.entry_end or t >= icfg.flat_by):
+            continue
+        idx_upto = index_df.loc[:ts]
+        ok, why = index_ok(idx_upto, icfg)
+        if not ok:
+            res.index_blocked = why
+            continue
+        candidates = []
+        for sym, df in frames.items():
+            if ts not in df.index:
+                continue
+            out = evaluate_orb(sym, sectors[sym], df.loc[:ts], idx_upto, icfg)
+            if hasattr(out, "reason"):
+                if out.reason != NO_BREAKOUT:
+                    res.rejections[sym] = f"{t:%H:%M} {out.reason}"
+            else:
+                candidates.append(out)
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda s: s.score)
+        qty = size_position(eq, ledger.getf("cash"), best.entry, best.stop, icfg)
+        if qty < 1:
+            res.notes.append(f"{best.symbol}: position size 0 after risk caps")
+            continue
+        pending = {"setup": best, "qty": qty, "equity": eq}
+
+    if halted:
+        res.notes.append(halted)
+    if res.index_blocked and not res.new_entries:
+        res.notes.append(f"market filter: {res.index_blocked}")
+    last_ts = index_df.index[-1]
+    for p in ledger.positions():
+        df = frames[p["symbol"]]
+        upto = df.loc[:last_ts]
+        _sell(day, ledger, p, float(upto["close"].iloc[-1]), "INTRADAY_EOD_LAST_BAR", settings, res)
+
+
+def _open(day: date, ledger: Ledger, s, qty: int, fill: float, res: SessionResult) -> None:
+    eq = ledger.equity_now()
+    buy_cost = intraday_charges(fill * qty, "BUY")
+    ledger.set("cash", ledger.getf("cash") - fill * qty - buy_cost)
+    ledger.open_position(day, {"symbol": s.symbol, "sector": s.sector, "qty": qty, "stop": s.stop,
+                               "target": s.target, "strategy": ORB_NAME, "regime": "INTRADAY"}, fill, buy_cost)
+    cap_used = fill * qty
+    pick = {
+        "symbol": s.symbol, "sector": s.sector, "qty": qty, "entry": round(fill, 2), "stop": s.stop,
+        "target": s.target, "score": s.score, "evidence": list(s.evidence), "invalidation": s.invalidation,
+        "capital_used": round(cap_used, 2),
+        "capital_pct_of_equity": round(100 * cap_used / eq, 2) if eq else 0.0,
+        "gross_rr": round((s.target - fill) / (fill - s.stop), 2) if fill > s.stop else 0.0,
+    }
+    res.new_entries.append(pick)
+    res.fills.append(f"{s.symbol} long {qty} @ {fill:.2f} (Rs{cap_used:,.0f} = {pick['capital_pct_of_equity']:.1f}% of equity)")
+    ledger.event(day, "FILL", s.symbol, json.dumps(pick))

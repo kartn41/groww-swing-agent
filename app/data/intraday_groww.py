@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.data.groww_source import GrowwCandleSource, FatalDataError, MalformedResponse, RateLimited, TransientFailure, classify
@@ -69,9 +69,21 @@ def _num(x):
 
 
 class GrowwIntradaySource(GrowwCandleSource):
-    def __init__(self, groww, **kw):
+    def __init__(self, groww, chunk_days: int = 25, **kw):
         super().__init__(groww, **kw)
         self.interval = resolve_five_min_interval(groww)
+        self.chunk_days = chunk_days
+
+    def iter_raw(self, groww_symbol: str, start: date, end: date):
+        """5m requests carry ~75 candles per day: keep each request window small."""
+        s = start
+        while s <= end:
+            e = min(s + timedelta(days=self.chunk_days - 1), end)
+            resp = self._call(
+                exchange=self.g.EXCHANGE_NSE, segment=self.g.SEGMENT_CASH, groww_symbol=groww_symbol,
+                start_time=f"{s} 09:00:00", end_time=f"{e} 15:59:59", candle_interval=self.interval)
+            yield s, e, resp
+            s = e + timedelta(days=1)
 
     def iter_bars(self, groww_symbol: str, start: date, end: date):
         for s, e, resp in self.iter_raw(groww_symbol, start, end):
