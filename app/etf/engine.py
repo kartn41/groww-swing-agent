@@ -17,7 +17,7 @@ import pandas as pd
 from app.etf.analysis import InsufficientData, Snapshot, analyse
 from app.etf.config import EtfConfig
 from app.etf.ledger import EtfLedger
-from app.etf.strategy import EntrySignal, Rejection, entry_signal, rank, review, size, sudden_drop_level
+from app.etf.strategy import EntrySignal, Rejection, entry_signal, rank, review, size, size_core, sudden_drop_level
 from app.execution.executor import make_reference_id
 from app.paper.simulator import Bar
 from app.risk.costs import order_charges
@@ -157,6 +157,33 @@ def end_of_day(d: date, ledger: EtfLedger, frames: dict, cfg: EtfConfig, kill_sw
                                "reasons": g.reasons, "regime": g.regime})
         ledger.event(d, "ORDER_PLANNED", g.symbol, f"T{g.tranche} {g.kind} {z.qty} @ {g.limit:.2f} stop {z.new_stop:.2f} "
                                                    f"target {target:.2f}")
+
+    planned_syms = {o["symbol"] for o in res.new_orders}
+    if cfg.strategy_mode == "momentum" and not block:
+        for sym, s in res.snapshots.items():
+            if sym in res.exits_flagged or sym in planned_syms:
+                continue
+            prof = cfg.profile(sym)
+            sig, z = size_core(sym, s, prof, cfg, equity, cash, exposure, ledger.view(sym))
+            if sig is None or z.qty <= 0:
+                if z.reasons and sym not in res.rejections:
+                    res.rejections.setdefault(sym, "core: " + "; ".join(z.reasons))
+                continue
+            target = round(z.new_avg * (1 + sig.targets.preferred), 2)
+            ref = buy_ref(sym, sig.tranche, d)
+            plan = {"targets": vars(sig.targets), "score": sig.score, "planned_value": z.planned_value,
+                    "net_rr": round(z.net_rr, 2), "risk": round(z.risk_amount, 2), "regime": sig.regime,
+                    "pullback": sig.pullback, "reasons": sig.reasons, "atr_pct": s.atr_pct}
+            if ledger.add_order(ref, d, sym, "BUY", z.qty, sig.limit, stop=z.new_stop, target=target,
+                                tranche=sig.tranche, kind=sig.kind, reason="; ".join(sig.reasons[:2]), plan=plan):
+                cost = z.qty * sig.limit * (1 + prof.slippage_bps / 1e4)
+                cash -= cost + order_charges(cost, "BUY", cfg.costs)
+                exposure[sym] = exposure.get(sym, 0.0) + cost
+                res.new_orders.append({"ref": ref, "symbol": sym, "tranche": sig.tranche, "kind": sig.kind,
+                                       "qty": z.qty, "limit": sig.limit, "stop": z.new_stop, "target": target,
+                                       "score": sig.score, "net_rr": round(z.net_rr, 2),
+                                       "risk": round(z.risk_amount, 2), "reasons": sig.reasons, "regime": sig.regime})
+                ledger.event(d, "ORDER_PLANNED", sym, f"CORE {z.qty} @ {sig.limit:.2f}")
 
     # ---- bookkeeping ----
     ledger.set("peak_equity", max(ledger.getf("peak_equity", equity), equity))

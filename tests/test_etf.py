@@ -41,7 +41,8 @@ def snap(**kw) -> Snapshot:
                 prev_high=100.2, ema={5: 100.0, 9: 100.3, 20: 100.0, 50: 97.0, 200: 90.0}, slope50=0.02, adx=26.0,
                 pdi=24.0, mdi=18.0, rsi=50.0, rsi_prev=45.0, rsi_min5=42.0, macd=0.1, macd_signal=0.05, hist=0.05,
                 hist_prev=-0.02, hist_prev2=-0.05, roc10=-0.01, rv=1.2, atr=1.0, atr_pct=0.01, atr_pct_median=0.01,
-                bb_lower=98.5, bb_upper=104.0, pct_b=0.3, moves={2: -0.005, 3: -0.01, 5: -0.02, 10: -0.01},
+                bb_lower=98.5, bb_upper=104.0, pct_b=0.3, prev_day_pct=-0.01,
+                moves={2: -0.005, 3: -0.02, 5: -0.02, 10: -0.01},
                 swing_high=103.0, pullback_low=99.0, depth_pct=0.039, depth_atr=4.0 / 1.0)
     base.update(kw)
     s = Snapshot(**base)
@@ -590,6 +591,17 @@ class Config(unittest.TestCase):
         self.assertEqual(c.strategy_mode, "aggressive")
         self.assertEqual(c.min_net_rr, 0.65)
         self.assertGreater(c.profile("GOLDBEES").max_exposure_pct, 80)
+
+    def test_momentum_rebound_and_core(self):
+        from app.etf.strategy import core_target_fraction, size_core
+        mom = load_etf_config({"ETF_STRATEGY_MODE": "momentum", "ETF_SYMBOLS": "GOLDBEES"})
+        self.assertEqual(core_target_fraction(an.STRONG_BULL, mom), 0.55)
+        s = snap(regime=an.STRONG_BULL, prev_day_pct=-0.02, open=100.0, close=101.5, moves={3: -0.025, 2: 0.01, 5: 0, 10: 0})
+        out = entry_signal(s, mom.profile("GOLDBEES"), mom)
+        self.assertEqual(out.kind, "REBOUND_INITIAL")
+        sig, z = size_core("GOLDBEES", s, mom.profile("GOLDBEES"), mom, 100000, 100000, {}, None)
+        self.assertIsNotNone(sig)
+        self.assertGreater(z.qty, 0)
 
 
 class Report(unittest.TestCase):

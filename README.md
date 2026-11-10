@@ -250,6 +250,9 @@ were slightly positive. Volume only added to the pullback score and never blocke
 Long-only CNC delivery in GOLDBEES and SILVERBEES only, using limit orders and tracked in its own ledger
 (`data/etf_paper.db`, or `data/etf_live.db` in live mode). The stock strategy is unchanged; set
 `STOCK_SWING_ENABLED=false` to run only the ETFs.
+- `ETF_STRATEGY_MODE`: `balanced` (dips only), `aggressive` (trend + dips), `momentum` (**core ~55% in strong bull**
+  so +3% days hit part of the book, plus rebound after selloffs and follow-through after +1% days). Backtest
+  before paper; drawdowns are higher than balanced.
 - End of day (inside `daily`, or on its own with `python -m app.run etf-daily`): daily indicators (EMA 5/9/20/50/200,
   ADX, RSI, MACD, ROC, ATR, Bollinger Bands, volume vs its 20-day average). The day is labelled with one of
   5 regimes and the dip with one of 4 types (healthy correction, pullback in uptrend, strong bearish momentum,

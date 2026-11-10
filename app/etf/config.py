@@ -53,7 +53,11 @@ def etf_costs() -> CostModel:
 
 @dataclass(frozen=True)
 class EtfConfig:
-    strategy_mode: str = "balanced"            # balanced | aggressive (ETF_STRATEGY_MODE)
+    strategy_mode: str = "balanced"            # balanced | aggressive | momentum (ETF_STRATEGY_MODE)
+    core_pct_strong: float = 55.0              # momentum: target % of equity in ETF when STRONG_BULL
+    core_pct_mild: float = 40.0                # momentum: target when MILD_BULL
+    rebound_drop_pct: float = 1.2              # momentum: buy green day after prior session fell at least this much
+    momentum_day_pct: float = 1.0              # momentum: add on session after prior day rose at least this much
     symbols: str = "GOLDBEES,SILVERBEES"      # ETF_SYMBOLS=GOLDBEES to trade gold only
     capital: float = 100000.0
     max_alloc_pct: float = 100.0             # strategy capital that may ever be invested
@@ -131,9 +135,9 @@ def load_etf_config(env=None) -> EtfConfig:
     if len(w) != 3 or abs(sum(w) - 1.0) > 1e-6 or min(w) <= 0:
         raise ValueError(f"ETF_TRANCHE_WEIGHTS must be three positive numbers summing to 1, got {w}")
     mode = str(cfg.strategy_mode or "balanced").strip().lower()
-    if mode not in ("balanced", "aggressive"):
-        raise ValueError(f"ETF_STRATEGY_MODE must be balanced or aggressive, got {cfg.strategy_mode!r}")
-    if mode == "aggressive":
+    if mode not in ("balanced", "aggressive", "momentum"):
+        raise ValueError(f"ETF_STRATEGY_MODE must be balanced, aggressive, or momentum, got {cfg.strategy_mode!r}")
+    if mode in ("aggressive", "momentum"):
         aggr_profiles = {}
         for sym, balanced in (("GOLDBEES", GOLD), ("SILVERBEES", SILVER)):
             base_p = GOLD_AGGR if sym == "GOLDBEES" else SILVER_AGGR
@@ -143,14 +147,20 @@ def load_etf_config(env=None) -> EtfConfig:
                 if f.name != "symbol" and raw not in (None, ""):
                     pk[f.name] = _cast(getattr(balanced, f.name), raw)
             aggr_profiles[sym] = replace(base_p, **pk)
-        cfg = replace(
-            cfg,
-            strategy_mode="aggressive",
+        kw_mode = dict(
             max_combined_pct=95.0 if cfg.max_combined_pct == 80.0 else cfg.max_combined_pct,
             tranche_weights=(0.55, 0.25, 0.2) if cfg.tranche_weights == (0.4, 0.3, 0.3) else cfg.tranche_weights,
-            min_net_rr=0.65 if cfg.min_net_rr == 0.8 else cfg.min_net_rr,
             min_days_between_tranches=1 if cfg.min_days_between_tranches == 2 else cfg.min_days_between_tranches,
             extended_target_pct=max(cfg.extended_target_pct, 3.5),
             profiles={**cfg.profiles, **aggr_profiles},
         )
+        if mode == "aggressive":
+            cfg = replace(cfg, strategy_mode="aggressive",
+                          min_net_rr=0.65 if cfg.min_net_rr == 0.8 else cfg.min_net_rr, **kw_mode)
+        else:
+            mo = {"strategy_mode": "momentum",
+                  "min_net_rr": 0.55 if cfg.min_net_rr == 0.8 else cfg.min_net_rr, **kw_mode}
+            if env.get("ETF_EXIT_ON_RSI_OVERBOUGHT") in (None, ""):
+                mo["exit_on_rsi_overbought"] = False
+            cfg = replace(cfg, **mo)
     return replace(cfg, strategy_mode=mode)

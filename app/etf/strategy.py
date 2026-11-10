@@ -28,7 +28,52 @@ AGGRESSIVE_RULES = {
 
 
 def regime_rules(cfg: EtfConfig):
-    return AGGRESSIVE_RULES if cfg.strategy_mode == "aggressive" else BALANCED_RULES
+    if cfg.strategy_mode in ("aggressive", "momentum"):
+        return AGGRESSIVE_RULES
+    return BALANCED_RULES
+
+
+def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
+    if cfg.strategy_mode != "momentum":
+        return 0.0
+    if regime == STRONG_BULL:
+        return cfg.core_pct_strong / 100
+    if regime == MILD_BULL:
+        return cfg.core_pct_mild / 100
+    return 0.0
+
+
+def _rebound_after_drop(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
+    if cfg.strategy_mode != "momentum":
+        return False, []
+    if s.regime not in (STRONG_BULL, MILD_BULL, SIDEWAYS):
+        return False, []
+    drop = s.prev_day_pct
+    if drop > -cfg.rebound_drop_pct / 100 and s.moves.get(3, 0) > -2 * cfg.rebound_drop_pct / 100:
+        return False, []
+    if s.close <= s.open or s.close <= s.prev_close or s.close < s.ema[20]:
+        return False, []
+    if s.rsi >= 72:
+        return False, []
+    why = (f"rebound after {drop:+.1%} prior session"
+           if drop <= -cfg.rebound_drop_pct / 100 else f"rebound after {s.moves[3]:+.1%} over 3 sessions")
+    return True, [why + f" (selloff >= {cfg.rebound_drop_pct:.1f}%)",
+                  f"green close {s.close:.2f} above EMA20 {s.ema[20]:.2f}"]
+
+
+def _momentum_follow_through(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
+    if cfg.strategy_mode != "momentum":
+        return False, []
+    if s.regime not in (STRONG_BULL, MILD_BULL):
+        return False, []
+    if s.prev_day_pct < cfg.momentum_day_pct / 100:
+        return False, []
+    if not (s.hist > 0 and s.close > s.ema[9] > s.ema[20]):
+        return False, []
+    if s.rsi >= 75:
+        return False, []
+    return True, [f"follow-through after prior session {s.prev_day_pct:+.1%}",
+                  f"close above EMA9/20, MACD hist positive"]
 REGIME_WEIGHT = {STRONG_BULL: 1.0, MILD_BULL: 0.85, SIDEWAYS: 0.7, MILD_BEAR: 0.5, STRONG_BEAR: 0.0}
 
 
@@ -141,7 +186,7 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     sym = s.symbol
     rules = regime_rules(cfg)
     factor, need, allowed = rules[s.regime]
-    aggressive = cfg.strategy_mode == "aggressive"
+    aggressive = cfg.strategy_mode in ("aggressive", "momentum")
     need = max(1, need + cfg.extra_confirmations)
     if s.vol_shock:
         need += 1
@@ -162,10 +207,18 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
 
     kind, reasons = "INITIAL", []
     trend, trend_reasons = _trend_rally(s, aggressive)
+    rebound, rebound_reasons = _rebound_after_drop(s, cfg)
+    momentum, momentum_reasons = _momentum_follow_through(s, cfg)
     if pos is None:
         if trend and s.pullback in allowed:
             kind = "TREND_INITIAL"
             reasons = trend_reasons
+        elif rebound:
+            kind = "REBOUND_INITIAL"
+            reasons = rebound_reasons
+        elif momentum:
+            kind = "MOMENTUM_INITIAL"
+            reasons = momentum_reasons
         elif s.pullback not in allowed:
             return Rejection(sym, f"{s.pullback} is not a buyable setup in a {s.regime} market")
         else:
@@ -194,15 +247,17 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
                            "pullback bought back")
         else:
             return Rejection(sym, "no new favourable price for the next tranche (no blind averaging)")
-    rsi_cap = 68 if kind == "TREND_INITIAL" else 62
+    rsi_cap = 74 if kind in ("TREND_INITIAL", "MOMENTUM_INITIAL", "REBOUND_INITIAL") else 62
     if s.rsi > rsi_cap:
         return Rejection(sym, f"RSI {s.rsi:.0f} already extended (> {rsi_cap})")
     if n < need:
         return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {s.regime}"
                               + (" (+1 for volatility shock)" if s.vol_shock else ""))
     limit = round(s.close * (1 + cfg.entry_headroom_pct / 100), 2)
-    structure = (min(s.pullback_low, s.ema[20] - 0.5 * s.atr) if kind == "TREND_INITIAL"
-                 else s.pullback_low - 0.5 * s.atr)
+    if kind in ("TREND_INITIAL", "MOMENTUM_INITIAL", "REBOUND_INITIAL"):
+        structure = min(s.pullback_low, s.ema[20] - 0.5 * s.atr)
+    else:
+        structure = s.pullback_low - 0.5 * s.atr
     dist = limit - structure
     if dist > prof.stop_atr_max * s.atr:
         return Rejection(sym, f"stop below the pullback low would be {dist / s.atr:.1f} ATR away "
@@ -220,8 +275,36 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
                        s.regime, s.pullback, reasons)
 
 
+def size_core(sym: str, s: Snapshot, prof: Profile, cfg: EtfConfig, equity: float, cash: float,
+              exposure: dict, pos: Optional[PositionView]) -> tuple[Optional[EntrySignal], Sizing]:
+    """Top up toward the momentum core target so big up-days are captured while trend is intact."""
+    frac = core_target_fraction(s.regime, cfg)
+    z = Sizing()
+    if frac <= 0:
+        z.reasons.append("no core target in this regime")
+        return None, z
+    slip = prof.slippage_bps / 1e4
+    cap = equity * min(prof.max_exposure_pct, cfg.max_alloc_pct) / 100 * frac
+    held = (pos.qty * s.close) if pos else 0.0
+    gap = cap - held
+    eff = s.close * (1 + slip)
+    if gap < eff * 0.98:
+        z.reasons.append("core allocation already at target")
+        return None, z
+    limit = round(s.close, 2)
+    stop = round(min(s.ema[50] - 1.25 * s.atr, limit - prof.stop_atr_min * s.atr), 2)
+    t = targets_for(s, prof, cfg)
+    tr = 1 if pos is None else min(pos.tranches + 1, 3)
+    sig = EntrySignal(sym, tr, "CORE_TOPUP", limit, stop, t, 70.0, s.regime, s.pullback,
+                      [f"core target {frac:.0%} of equity (~Rs{cap:,.0f}), held Rs{held:,.0f}, gap Rs{gap:,.0f}",
+                       f"regime {s.regime}"])
+    z = size(sig, prof, cfg, equity, cash, exposure, pos, s.vol_shock, core_qty=math.floor(gap / eff))
+    return (sig, z) if z.qty > 0 else (None, z)
+
+
 def size(sig: EntrySignal, prof: Profile, cfg: EtfConfig, equity: float, cash: float,
-         exposure: dict, pos: Optional[PositionView], vol_shock: bool = False) -> Sizing:
+         exposure: dict, pos: Optional[PositionView], vol_shock: bool = False,
+         core_qty: Optional[int] = None) -> Sizing:
     """Quantity for this tranche. exposure: symbol -> current market value held."""
     z = Sizing()
     factor = regime_rules(cfg)[sig.regime][0] * (0.5 if vol_shock else 1.0)
@@ -229,9 +312,12 @@ def size(sig: EntrySignal, prof: Profile, cfg: EtfConfig, equity: float, cash: f
     eff = sig.limit * (1 + slip)
     planned = pos.planned_value if pos else equity * min(prof.max_exposure_pct, cfg.max_alloc_pct) / 100 * factor
     z.planned_value = planned
-    want = planned * cfg.tranche_weights[sig.tranche - 1]
-    if sig.tranche == 3 and pos is not None:
-        want = max(planned - pos.qty * pos.avg, 0.0)
+    if sig.kind == "CORE_TOPUP" and core_qty is not None:
+        want = core_qty * eff
+    else:
+        want = planned * cfg.tranche_weights[sig.tranche - 1]
+        if sig.tranche == 3 and pos is not None:
+            want = max(planned - pos.qty * pos.avg, 0.0)
     held_here = exposure.get(sig.symbol, 0.0)
     held_other = sum(v for k, v in exposure.items() if k != sig.symbol)
     room = min(equity * prof.max_exposure_pct / 100 - held_here,
@@ -268,9 +354,10 @@ def size(sig: EntrySignal, prof: Profile, cfg: EtfConfig, equity: float, cash: f
     if reward <= 0:
         z.reasons.append("expected profit at target does not cover costs")
         return z
-    if z.net_rr < cfg.min_net_rr:
-        z.reasons.append(f"net reward/risk {z.net_rr:.2f} < {cfg.min_net_rr} after costs")
-        return z
+    if sig.kind != "CORE_TOPUP":
+        if z.net_rr < cfg.min_net_rr:
+            z.reasons.append(f"net reward/risk {z.net_rr:.2f} < {cfg.min_net_rr} after costs")
+            return z
     z.qty, z.risk_amount, z.new_avg, z.new_stop = qty, loss, avg, sig.stop
     return z
 
@@ -297,10 +384,10 @@ def review(pos: PositionView, s: Snapshot, prof: Profile, cfg: EtfConfig) -> Rev
         if lock > r.stop:
             r.stop = lock
             r.notes.append(f"profit lock stop {lock:.2f}")
-    if s.regime == STRONG_BEAR:
+    if s.regime == STRONG_BEAR or (cfg.strategy_mode == "momentum" and s.regime == MILD_BEAR):
         r.exit_reason = "TREND_CHANGE"
     elif cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev \
-            and not (cfg.strategy_mode == "aggressive" and strong):
+            and not (cfg.strategy_mode in ("aggressive", "momentum") and strong):
         r.exit_reason = "RSI_OVERBOUGHT"
     elif cfg.exit_on_macd_cross and pnl > be and s.macd < s.macd_signal and s.hist_prev >= 0:
         r.exit_reason = "MACD_BEARISH_CROSS"

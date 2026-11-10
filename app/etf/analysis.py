@@ -49,6 +49,7 @@ class Snapshot:
     bb_lower: float
     bb_upper: float
     pct_b: float
+    prev_day_pct: float            # prior session close-to-close return
     moves: dict                  # {2: .., 3: .., 5: .., 10: ..} close-to-close returns
     swing_high: float            # highest high of the last 20 sessions
     pullback_low: float          # lowest low of the last 5 sessions
@@ -127,6 +128,7 @@ def analyse(symbol: str, df: pd.DataFrame) -> Snapshot:
         roc10=float(roc(c, 10).iloc[-1]), rv=float(relative_volume(v, 20).iloc[-1]),
         atr=float(a.iloc[-1]), atr_pct=float(atr_pct.iloc[-1]), atr_pct_median=float(atr_pct.iloc[-250:].median()),
         bb_lower=float(bb["lower"].iloc[-1]), bb_upper=float(bb["upper"].iloc[-1]), pct_b=float(bb["pct_b"].iloc[-1]),
+        prev_day_pct=float(c.iloc[-2] / c.iloc[-3] - 1) if len(c) >= 3 else 0.0,
         moves={k: float(c.iloc[-1] / c.iloc[-1 - k] - 1) for k in (2, 3, 5, 10)},
         swing_high=hi20, pullback_low=lo5, depth_pct=(hi20 - lo5) / hi20,
         depth_atr=(hi20 - lo5) / float(a.iloc[-1]) if float(a.iloc[-1]) > 0 else 0.0,
