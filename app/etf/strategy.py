@@ -271,12 +271,14 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
         structure = min(s.pullback_low, s.ema[20] - 0.5 * s.atr)
     else:
         structure = s.pullback_low - 0.5 * s.atr
-    dist = limit - structure
-    stop_cap = prof.stop_atr_max + (1.0 if cfg.strategy_mode == "momentum" and kind == "REBOUND_INITIAL" else 0)
-    if dist > stop_cap * s.atr:
-        return Rejection(sym, f"stop below structure would be {dist / s.atr:.1f} ATR away "
-                              f"(> {stop_cap}); setup too loose")
-    stop = round(min(structure, limit - prof.stop_atr_min * s.atr), 2)
+    if kind == "REBOUND_INITIAL" and cfg.strategy_mode == "momentum":
+        stop = round(limit - prof.stop_atr_min * s.atr, 2)
+    else:
+        dist = limit - structure
+        if dist > prof.stop_atr_max * s.atr:
+            return Rejection(sym, f"stop below structure would be {dist / s.atr:.1f} ATR away "
+                                  f"(> {prof.stop_atr_max}); setup too loose")
+        stop = round(min(structure, limit - prof.stop_atr_min * s.atr), 2)
     if pos is not None:
         stop = round(min(stop, pos.stop), 2)
     t = targets_for(s, prof, cfg)
