@@ -46,11 +46,12 @@ def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
 
 
 def plan_limit(close: float, kind: str, cfg: EtfConfig) -> float:
-    """Next-session buy limit. Momentum uses a wider cap so gap-up days (e.g. +3%) can still fill."""
-    bump = cfg.entry_headroom_pct / 100
-    if cfg.strategy_mode == "momentum":
-        bump = max(bump, cfg.momentum_chase_pct / 100)
-    return round(close * (1 + bump), 2)
+    """Next-session buy limit. Core/top-ups use a wide cap for gap-up days; tactical entries use a smaller chase."""
+    if cfg.strategy_mode == "momentum" and kind == "CORE_TOPUP":
+        return round(close * (1 + cfg.momentum_chase_pct / 100), 2)
+    if cfg.strategy_mode == "momentum" and kind in ("MOMENTUM_INITIAL", "REBOUND_INITIAL", "TREND_INITIAL"):
+        return round(close * (1 + max(cfg.entry_headroom_pct, 1.0) / 100), 2)
+    return round(close * (1 + cfg.entry_headroom_pct / 100), 2)
 
 
 def _rebound_after_drop(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
