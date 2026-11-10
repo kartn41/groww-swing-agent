@@ -106,9 +106,6 @@ class Ledger:
         self.con.execute("DELETE FROM positions WHERE symbol=?", (p["symbol"],))
         return net
 
-    def update_stop(self, symbol: str, stop: float) -> None:
-        self.con.execute("UPDATE positions SET stop=? WHERE symbol=?", (stop, symbol))
-
     def mark(self, symbol: str, close: float, exit_pending: Optional[bool] = None) -> None:
         self.con.execute("UPDATE positions SET last_close=? WHERE symbol=?", (close, symbol))
         if exit_pending is not None:
