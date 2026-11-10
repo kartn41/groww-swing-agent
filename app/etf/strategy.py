@@ -265,14 +265,17 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
         return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {s.regime}"
                               + (" (+1 for volatility shock)" if s.vol_shock else ""))
     limit = plan_limit(s.close, kind, cfg)
-    if kind in ("TREND_INITIAL", "MOMENTUM_INITIAL", "REBOUND_INITIAL"):
+    if kind == "REBOUND_INITIAL":
+        structure = s.ema[50] - 1.25 * s.atr
+    elif kind in ("TREND_INITIAL", "MOMENTUM_INITIAL"):
         structure = min(s.pullback_low, s.ema[20] - 0.5 * s.atr)
     else:
         structure = s.pullback_low - 0.5 * s.atr
     dist = limit - structure
-    if dist > prof.stop_atr_max * s.atr:
-        return Rejection(sym, f"stop below the pullback low would be {dist / s.atr:.1f} ATR away "
-                              f"(> {prof.stop_atr_max}); setup too loose")
+    stop_cap = prof.stop_atr_max + (1.0 if cfg.strategy_mode == "momentum" and kind == "REBOUND_INITIAL" else 0)
+    if dist > stop_cap * s.atr:
+        return Rejection(sym, f"stop below structure would be {dist / s.atr:.1f} ATR away "
+                              f"(> {stop_cap}); setup too loose")
     stop = round(min(structure, limit - prof.stop_atr_min * s.atr), 2)
     if pos is not None:
         stop = round(min(stop, pos.stop), 2)
