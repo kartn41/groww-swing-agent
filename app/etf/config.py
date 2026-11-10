@@ -56,6 +56,8 @@ class EtfConfig:
     strategy_mode: str = "balanced"            # balanced | aggressive | momentum (ETF_STRATEGY_MODE)
     core_pct_strong: float = 55.0              # momentum: target % of equity in ETF when STRONG_BULL
     core_pct_mild: float = 40.0                # momentum: target when MILD_BULL
+    core_pct_sideways: float = 30.0            # momentum: still hold a slice when trend is chopping but not bearish
+    momentum_chase_pct: float = 3.5            # momentum: buy limit may be this far above the signal close (gap-up days)
     rebound_drop_pct: float = 1.2              # momentum: buy green day after prior session fell at least this much
     momentum_day_pct: float = 1.0              # momentum: add on session after prior day rose at least this much
     symbols: str = "GOLDBEES,SILVERBEES"      # ETF_SYMBOLS=GOLDBEES to trade gold only
@@ -159,7 +161,9 @@ def load_etf_config(env=None) -> EtfConfig:
                           min_net_rr=0.65 if cfg.min_net_rr == 0.8 else cfg.min_net_rr, **kw_mode)
         else:
             mo = {"strategy_mode": "momentum",
-                  "min_net_rr": 0.55 if cfg.min_net_rr == 0.8 else cfg.min_net_rr, **kw_mode}
+                  "min_net_rr": 0.55 if cfg.min_net_rr == 0.8 else cfg.min_net_rr,
+                  "max_chase_pct": 3.5 if cfg.max_chase_pct == 0.3 else cfg.max_chase_pct,
+                  **kw_mode}
             if env.get("ETF_EXIT_ON_RSI_OVERBOUGHT") in (None, ""):
                 mo["exit_on_rsi_overbought"] = False
             cfg = replace(cfg, **mo)

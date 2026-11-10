@@ -241,9 +241,10 @@ def cmd_etf_backtest(args) -> int:
     lines = []
     for name, dev, test, folds in sections:
         t = test or {}
-        lines.append(f"{name}: dev {dev.get('total_return', 0):+.2%} ({dev.get('trades', 0)} trades, PF "
-                     f"{dev.get('profit_factor') or 0:.2f}, max DD {dev.get('max_drawdown', 0):.1%}); holdout "
-                     f"{t.get('total_return', 0):+.2%} ({t.get('trades', 0)} trades, PF {t.get('profit_factor') or 0:.2f})")
+        hold = (f"holdout {t.get('total_return', 0):+.2%} ({t.get('trades', 0)} trades, PF "
+                f"{t.get('profit_factor') or 0:.2f})" if test else "single window (no --holdout)")
+        lines.append(f"{name}: {dev.get('total_return', 0):+.2%} ({dev.get('trades', 0)} trades, PF "
+                     f"{dev.get('profit_factor') or 0:.2f}, max DD {dev.get('max_drawdown', 0):.1%}); {hold}")
         for f in bt.verdict(dev, test, folds):
             lines.append(f"  - {f}")
     print("\n".join(lines))

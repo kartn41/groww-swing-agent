@@ -40,7 +40,17 @@ def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
         return cfg.core_pct_strong / 100
     if regime == MILD_BULL:
         return cfg.core_pct_mild / 100
+    if regime == SIDEWAYS:
+        return cfg.core_pct_sideways / 100
     return 0.0
+
+
+def plan_limit(close: float, kind: str, cfg: EtfConfig) -> float:
+    """Next-session buy limit. Momentum uses a wider cap so gap-up days (e.g. +3%) can still fill."""
+    bump = cfg.entry_headroom_pct / 100
+    if cfg.strategy_mode == "momentum":
+        bump = max(bump, cfg.momentum_chase_pct / 100)
+    return round(close * (1 + bump), 2)
 
 
 def _rebound_after_drop(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
@@ -253,7 +263,7 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     if n < need:
         return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {s.regime}"
                               + (" (+1 for volatility shock)" if s.vol_shock else ""))
-    limit = round(s.close * (1 + cfg.entry_headroom_pct / 100), 2)
+    limit = plan_limit(s.close, kind, cfg)
     if kind in ("TREND_INITIAL", "MOMENTUM_INITIAL", "REBOUND_INITIAL"):
         structure = min(s.pullback_low, s.ema[20] - 0.5 * s.atr)
     else:
@@ -291,7 +301,7 @@ def size_core(sym: str, s: Snapshot, prof: Profile, cfg: EtfConfig, equity: floa
     if gap < eff * 0.98:
         z.reasons.append("core allocation already at target")
         return None, z
-    limit = round(s.close, 2)
+    limit = plan_limit(s.close, "CORE_TOPUP", cfg)
     stop = round(min(s.ema[50] - 1.25 * s.atr, limit - prof.stop_atr_min * s.atr), 2)
     t = targets_for(s, prof, cfg)
     tr = 1 if pos is None else min(pos.tranches + 1, 3)

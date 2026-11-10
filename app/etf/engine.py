@@ -256,10 +256,14 @@ def simulate_session(d: date, ledger: EtfLedger, frames: dict, cfg: EtfConfig, l
         if bar.open <= o["stop"]:
             ledger.update_order(o["ref"], status="CANCELLED", reason="opened at/below stop: setup invalidated")
             continue
-        if bar.open > o["limit_price"] * (1 + cfg.max_chase_pct / 100):
+        chase = cfg.max_chase_pct / 100
+        cap = o["limit_price"] * (1 + chase) if cfg.strategy_mode != "momentum" else o["limit_price"]
+        if bar.open > cap:
             ledger.update_order(o["ref"], status="EXPIRED", reason="gapped above limit: not chasing")
             continue
-        if bar.open <= o["limit_price"] * (1 + cfg.max_chase_pct / 100) and bar.open <= o["limit_price"]:
+        if bar.open <= o["limit_price"]:
+            px = bar.open
+        elif bar.open <= cap:
             px = bar.open
         elif bar.low <= o["limit_price"]:
             px = o["limit_price"]
