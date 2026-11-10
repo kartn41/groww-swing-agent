@@ -25,12 +25,36 @@ AGGRESSIVE_RULES = {
     MILD_BEAR: (0.0, 99, set()),
     STRONG_BEAR: (0.0, 99, set()),
 }
+MOMENTUM_RULES = {
+    STRONG_BULL: (1.0, 1, {UPTREND_PULLBACK, HEALTHY_CORRECTION, NO_PULLBACK, POSSIBLE_REVERSAL}),
+    MILD_BULL: (0.9, 2, {UPTREND_PULLBACK, HEALTHY_CORRECTION, NO_PULLBACK, POSSIBLE_REVERSAL}),
+    SIDEWAYS: (0.5, 2, {UPTREND_PULLBACK, HEALTHY_CORRECTION, POSSIBLE_REVERSAL}),
+    MILD_BEAR: (0.35, 3, {POSSIBLE_REVERSAL}),
+    STRONG_BEAR: (0.0, 99, set()),
+}
 
 
 def regime_rules(cfg: EtfConfig):
-    if cfg.strategy_mode in ("aggressive", "momentum"):
+    if cfg.strategy_mode == "momentum":
+        return MOMENTUM_RULES
+    if cfg.strategy_mode == "aggressive":
         return AGGRESSIVE_RULES
     return BALANCED_RULES
+
+
+def trading_regime(s: Snapshot, cfg: EtfConfig) -> str:
+    """Momentum entries: a pullback below short EMAs while still above the 200d trend is a correction, not a no-buy bear."""
+    if cfg.strategy_mode != "momentum":
+        return s.regime
+    if s.close <= s.ema[200]:
+        return s.regime
+    if s.regime == STRONG_BEAR:
+        if s.close > s.ema[50] and s.slope50 > 0 and s.hist > 0:
+            return MILD_BULL
+        return SIDEWAYS
+    if s.regime == MILD_BEAR and (s.pullback == POSSIBLE_REVERSAL or s.hist >= s.hist_prev):
+        return SIDEWAYS
+    return s.regime
 
 
 def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
@@ -57,7 +81,8 @@ def plan_limit(close: float, kind: str, cfg: EtfConfig) -> float:
 def _rebound_after_drop(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
     if cfg.strategy_mode != "momentum":
         return False, []
-    if s.regime not in (STRONG_BULL, MILD_BULL, SIDEWAYS):
+    tr = trading_regime(s, cfg)
+    if tr not in (STRONG_BULL, MILD_BULL, SIDEWAYS):
         return False, []
     drop = s.prev_day_pct
     if drop > -cfg.rebound_drop_pct / 100 and s.moves.get(3, 0) > -2 * cfg.rebound_drop_pct / 100:
@@ -75,7 +100,7 @@ def _rebound_after_drop(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
 def _momentum_follow_through(s: Snapshot, cfg: EtfConfig) -> tuple[bool, list[str]]:
     if cfg.strategy_mode != "momentum":
         return False, []
-    if s.regime not in (STRONG_BULL, MILD_BULL):
+    if trading_regime(s, cfg) not in (STRONG_BULL, MILD_BULL):
         return False, []
     if s.prev_day_pct < cfg.momentum_day_pct / 100:
         return False, []
@@ -164,9 +189,10 @@ def breakeven_frac(prof: Profile, cfg: EtfConfig, value: float = 50000.0) -> flo
     return 2 * prof.slippage_bps / 1e4 + round_trip_cost(value, value, 1, cfg.costs) / value
 
 
-def _trend_rally(s: Snapshot, aggressive: bool) -> tuple[bool, list[str]]:
+def _trend_rally(s: Snapshot, aggressive: bool, cfg: EtfConfig) -> tuple[bool, list[str]]:
     """Bull trend entry without a deep dip (aggressive mode only)."""
-    if not aggressive or s.regime not in (STRONG_BULL, MILD_BULL):
+    tr = trading_regime(s, cfg) if aggressive else s.regime
+    if not aggressive or tr not in (STRONG_BULL, MILD_BULL):
         return False, []
     e = s.ema
     stacked = s.close > e[20] > e[50] > e[200]
@@ -195,8 +221,9 @@ def _near_support(s: Snapshot) -> Optional[str]:
 def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[PositionView] = None,
                  cooldown: bool = False) -> EntrySignal | Rejection:
     sym = s.symbol
+    tr = trading_regime(s, cfg)
     rules = regime_rules(cfg)
-    factor, need, allowed = rules[s.regime]
+    factor, need, allowed = rules[tr]
     aggressive = cfg.strategy_mode in ("aggressive", "momentum")
     need = max(1, need + cfg.extra_confirmations)
     if s.vol_shock:
@@ -204,11 +231,11 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     if cooldown:
         return Rejection(sym, f"cool-down after a protective exit ({cfg.cooldown_days} sessions)")
     if factor <= 0:
-        return Rejection(sym, f"regime {s.regime}: no new purchases, preserving capital")
+        return Rejection(sym, f"regime {tr} (chart {s.regime}): no new purchases, preserving capital")
     if pos is not None and pos.tranches >= 3:
         return Rejection(sym, "all 3 tranches already bought")
-    if pos is not None and s.regime in (MILD_BEAR, STRONG_BEAR):
-        return Rejection(sym, f"regime {s.regime}: no averaging down in a bearish trend")
+    if pos is not None and tr in (MILD_BEAR, STRONG_BEAR):
+        return Rejection(sym, f"regime {tr}: no averaging down in a bearish trend")
     if pos is not None and pos.sessions_since_tranche < cfg.min_days_between_tranches:
         return Rejection(sym, f"last tranche {pos.sessions_since_tranche} session(s) ago "
                               f"(< {cfg.min_days_between_tranches})")
@@ -217,7 +244,7 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     n = len(s.confirmations)
 
     kind, reasons = "INITIAL", []
-    trend, trend_reasons = _trend_rally(s, aggressive)
+    trend, trend_reasons = _trend_rally(s, aggressive, cfg)
     rebound, rebound_reasons = _rebound_after_drop(s, cfg)
     momentum, momentum_reasons = _momentum_follow_through(s, cfg)
     if pos is None:
@@ -262,7 +289,8 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     if s.rsi > rsi_cap:
         return Rejection(sym, f"RSI {s.rsi:.0f} already extended (> {rsi_cap})")
     if n < need:
-        return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {s.regime}"
+        return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {tr}"
+                              + (f" (chart {s.regime})" if tr != s.regime else "")
                               + (" (+1 for volatility shock)" if s.vol_shock else ""))
     limit = plan_limit(s.close, kind, cfg)
     if kind == "REBOUND_INITIAL":
@@ -283,18 +311,18 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
         stop = round(min(stop, pos.stop), 2)
     t = targets_for(s, prof, cfg)
     rr = t.preferred * limit / (limit - stop)
-    score = round(100 * (0.4 * min(rr / 2, 1.0) + 0.3 * min(n / 6, 1.0) + 0.2 * REGIME_WEIGHT[s.regime]
+    score = round(100 * (0.4 * min(rr / 2, 1.0) + 0.3 * min(n / 6, 1.0) + 0.2 * REGIME_WEIGHT.get(tr, 0.5)
                          + 0.1 * min(s.adx / 30, 1.0)), 1)
     reasons += s.confirmations
-    reasons.append(f"regime {s.regime} ({s.regime_detail})")
+    reasons.append(f"regime {tr}" + (f" (daily label {s.regime})" if tr != s.regime else f" ({s.regime_detail})"))
     return EntrySignal(sym, 1 if pos is None else pos.tranches + 1, kind, limit, stop, t, score,
-                       s.regime, s.pullback, reasons)
+                       tr, s.pullback, reasons)
 
 
 def size_core(sym: str, s: Snapshot, prof: Profile, cfg: EtfConfig, equity: float, cash: float,
               exposure: dict, pos: Optional[PositionView]) -> tuple[Optional[EntrySignal], Sizing]:
     """Top up toward the momentum core target so big up-days are captured while trend is intact."""
-    frac = core_target_fraction(s.regime, cfg)
+    frac = core_target_fraction(trading_regime(s, cfg), cfg)
     z = Sizing()
     if frac <= 0:
         z.reasons.append("no core target in this regime")
@@ -310,10 +338,11 @@ def size_core(sym: str, s: Snapshot, prof: Profile, cfg: EtfConfig, equity: floa
     limit = plan_limit(s.close, "CORE_TOPUP", cfg)
     stop = round(min(s.ema[50] - 1.25 * s.atr, limit - prof.stop_atr_min * s.atr), 2)
     t = targets_for(s, prof, cfg)
-    tr = 1 if pos is None else min(pos.tranches + 1, 3)
-    sig = EntrySignal(sym, tr, "CORE_TOPUP", limit, stop, t, 70.0, s.regime, s.pullback,
+    tranche = 1 if pos is None else min(pos.tranches + 1, 3)
+    tr_reg = trading_regime(s, cfg)
+    sig = EntrySignal(sym, tranche, "CORE_TOPUP", limit, stop, t, 70.0, tr_reg, s.pullback,
                       [f"core target {frac:.0%} of equity (~Rs{cap:,.0f}), held Rs{held:,.0f}, gap Rs{gap:,.0f}",
-                       f"regime {s.regime}"])
+                       f"regime {tr_reg}" + (f" (daily {s.regime})" if tr_reg != s.regime else "")])
     z = size(sig, prof, cfg, equity, cash, exposure, pos, s.vol_shock, core_qty=math.floor(gap / eff))
     return (sig, z) if z.qty > 0 else (None, z)
 
