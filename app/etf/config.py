@@ -36,6 +36,13 @@ GOLD = Profile("GOLDBEES", max_exposure_pct=60.0, max_loss_pct=1.0, min_dip_pct=
 SILVER = Profile("SILVERBEES", max_exposure_pct=45.0, max_loss_pct=0.75, min_dip_pct=2.0, min_dip_atr=1.0,
                  rsi_dip=52.0, stop_atr_min=1.5, stop_atr_max=2.25, target_atr=2.0, trail_atr=1.5,
                  sudden_drop_pct=4.0, sudden_drop_atr=2.0, max_hold_days=20, slippage_bps=10.0, max_spread_bps=25.0)
+# Aggressive preset: more capital deployed, shallower dips, trend entries in bull regimes (validate with backtest).
+GOLD_AGGR = Profile("GOLDBEES", max_exposure_pct=85.0, max_loss_pct=1.25, min_dip_pct=0.5, min_dip_atr=0.75,
+                    rsi_dip=58.0, stop_atr_min=1.25, stop_atr_max=2.75, target_atr=2.5, trail_atr=2.0,
+                    sudden_drop_pct=2.5, sudden_drop_atr=2.0, max_hold_days=40, slippage_bps=5.0, max_spread_bps=15.0)
+SILVER_AGGR = Profile("SILVERBEES", max_exposure_pct=55.0, max_loss_pct=1.0, min_dip_pct=1.5, min_dip_atr=0.75,
+                      rsi_dip=55.0, stop_atr_min=1.25, stop_atr_max=2.5, target_atr=2.5, trail_atr=2.0,
+                      sudden_drop_pct=4.0, sudden_drop_atr=2.0, max_hold_days=30, slippage_bps=10.0, max_spread_bps=25.0)
 
 
 def etf_costs() -> CostModel:
@@ -46,6 +53,7 @@ def etf_costs() -> CostModel:
 
 @dataclass(frozen=True)
 class EtfConfig:
+    strategy_mode: str = "balanced"            # balanced | aggressive (ETF_STRATEGY_MODE)
     symbols: str = "GOLDBEES,SILVERBEES"      # ETF_SYMBOLS=GOLDBEES to trade gold only
     capital: float = 100000.0
     max_alloc_pct: float = 100.0             # strategy capital that may ever be invested
@@ -122,4 +130,27 @@ def load_etf_config(env=None) -> EtfConfig:
     w = cfg.tranche_weights
     if len(w) != 3 or abs(sum(w) - 1.0) > 1e-6 or min(w) <= 0:
         raise ValueError(f"ETF_TRANCHE_WEIGHTS must be three positive numbers summing to 1, got {w}")
-    return cfg
+    mode = str(cfg.strategy_mode or "balanced").strip().lower()
+    if mode not in ("balanced", "aggressive"):
+        raise ValueError(f"ETF_STRATEGY_MODE must be balanced or aggressive, got {cfg.strategy_mode!r}")
+    if mode == "aggressive":
+        aggr_profiles = {}
+        for sym, balanced in (("GOLDBEES", GOLD), ("SILVERBEES", SILVER)):
+            base_p = GOLD_AGGR if sym == "GOLDBEES" else SILVER_AGGR
+            pk = {}
+            for f in fields(Profile):
+                raw = env.get(f"ETF_{sym}_{f.name.upper()}")
+                if f.name != "symbol" and raw not in (None, ""):
+                    pk[f.name] = _cast(getattr(balanced, f.name), raw)
+            aggr_profiles[sym] = replace(base_p, **pk)
+        cfg = replace(
+            cfg,
+            strategy_mode="aggressive",
+            max_combined_pct=95.0 if cfg.max_combined_pct == 80.0 else cfg.max_combined_pct,
+            tranche_weights=(0.55, 0.25, 0.2) if cfg.tranche_weights == (0.4, 0.3, 0.3) else cfg.tranche_weights,
+            min_net_rr=0.65 if cfg.min_net_rr == 0.8 else cfg.min_net_rr,
+            min_days_between_tranches=1 if cfg.min_days_between_tranches == 2 else cfg.min_days_between_tranches,
+            extended_target_pct=max(cfg.extended_target_pct, 3.5),
+            profiles={**cfg.profiles, **aggr_profiles},
+        )
+    return replace(cfg, strategy_mode=mode)

@@ -159,6 +159,16 @@ class Entry(unittest.TestCase):
     def test_cooldown(self):
         self.assertIn("cool-down", entry_signal(snap(regime=an.STRONG_BULL), GOLD, CFG, cooldown=True).reason)
 
+    def test_aggressive_trend_initial_without_deep_dip(self):
+        aggr = load_etf_config({"ETF_STRATEGY_MODE": "aggressive", "ETF_SYMBOLS": "GOLDBEES"})
+        s = snap(regime=an.STRONG_BULL, pullback=an.NO_PULLBACK, depth_atr=0.4, depth_pct=0.004,
+                 slope50=0.03, adx=28, hist=0.08, hist_prev=0.05, roc10=0.02, close=102.0,
+                 ema={5: 101.5, 9: 101.2, 20: 100.5, 50: 99.0, 200: 90.0}, rsi=55, pct_b=0.6,
+                 swing_high=102.5, pullback_low=101.8)
+        out = entry_signal(s, aggr.profile("GOLDBEES"), aggr)
+        self.assertNotIsInstance(out, Rejection, getattr(out, "reason", ""))
+        self.assertEqual(out.kind, "TREND_INITIAL")
+
 
 class Sizing(unittest.TestCase):
     def sig(self, **kw):
@@ -574,6 +584,12 @@ class Config(unittest.TestCase):
 
     def test_no_stt_on_gold_silver_etfs(self):
         self.assertEqual(CFG.costs.stt_pct, 0.0)
+
+    def test_aggressive_mode_preset(self):
+        c = load_etf_config({"ETF_STRATEGY_MODE": "aggressive"})
+        self.assertEqual(c.strategy_mode, "aggressive")
+        self.assertEqual(c.min_net_rr, 0.65)
+        self.assertGreater(c.profile("GOLDBEES").max_exposure_pct, 80)
 
 
 class Report(unittest.TestCase):

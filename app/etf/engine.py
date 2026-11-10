@@ -72,7 +72,7 @@ def risk_block(ledger: EtfLedger, cfg: EtfConfig, equity: float) -> Optional[str
 def end_of_day(d: date, ledger: EtfLedger, frames: dict, cfg: EtfConfig, kill_switch: bool = False,
                benchmark: Optional[float] = None) -> EodResult:
     """frames: symbol -> daily DataFrame ending at d (completed session)."""
-    res = EodResult(d)
+    res = EodResult(d, notes=[f"strategy {cfg.strategy_mode}"])
     for sym, df in frames.items():
         if df is None or df.empty or df.index[-1] != d:
             res.data_issues[sym] = f"no completed daily candle for {d}"

@@ -5,19 +5,30 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.etf.analysis import (BEARISH_MOMENTUM, HEALTHY_CORRECTION, MILD_BEAR, MILD_BULL, POSSIBLE_REVERSAL,
-                              SIDEWAYS, STRONG_BEAR, STRONG_BULL, UPTREND_PULLBACK, Snapshot)
+from app.etf.analysis import (BEARISH_MOMENTUM, HEALTHY_CORRECTION, MILD_BEAR, MILD_BULL, NO_PULLBACK,
+                              POSSIBLE_REVERSAL, SIDEWAYS, STRONG_BEAR, STRONG_BULL, UPTREND_PULLBACK, Snapshot)
 from app.etf.config import EtfConfig, Profile
 from app.risk.costs import order_charges, round_trip_cost
 
 # regime -> (allocation factor, confirmations needed, pullback types that may be bought)
-REGIME_RULES = {
+BALANCED_RULES = {
     STRONG_BULL: (1.0, 2, {UPTREND_PULLBACK, HEALTHY_CORRECTION}),
     MILD_BULL: (0.8, 3, {UPTREND_PULLBACK, HEALTHY_CORRECTION}),
     SIDEWAYS: (0.6, 3, {UPTREND_PULLBACK, HEALTHY_CORRECTION, POSSIBLE_REVERSAL}),
     MILD_BEAR: (0.4, 4, {POSSIBLE_REVERSAL}),
     STRONG_BEAR: (0.0, 99, set()),
 }
+AGGRESSIVE_RULES = {
+    STRONG_BULL: (1.0, 1, {UPTREND_PULLBACK, HEALTHY_CORRECTION, NO_PULLBACK}),
+    MILD_BULL: (0.9, 2, {UPTREND_PULLBACK, HEALTHY_CORRECTION, NO_PULLBACK}),
+    SIDEWAYS: (0.5, 3, {UPTREND_PULLBACK, HEALTHY_CORRECTION}),
+    MILD_BEAR: (0.0, 99, set()),
+    STRONG_BEAR: (0.0, 99, set()),
+}
+
+
+def regime_rules(cfg: EtfConfig):
+    return AGGRESSIVE_RULES if cfg.strategy_mode == "aggressive" else BALANCED_RULES
 REGIME_WEIGHT = {STRONG_BULL: 1.0, MILD_BULL: 0.85, SIDEWAYS: 0.7, MILD_BEAR: 0.5, STRONG_BEAR: 0.0}
 
 
@@ -97,6 +108,26 @@ def breakeven_frac(prof: Profile, cfg: EtfConfig, value: float = 50000.0) -> flo
     return 2 * prof.slippage_bps / 1e4 + round_trip_cost(value, value, 1, cfg.costs) / value
 
 
+def _trend_rally(s: Snapshot, aggressive: bool) -> tuple[bool, list[str]]:
+    """Bull trend entry without a deep dip (aggressive mode only)."""
+    if not aggressive or s.regime not in (STRONG_BULL, MILD_BULL):
+        return False, []
+    e = s.ema
+    stacked = s.close > e[20] > e[50] > e[200]
+    momentum = s.slope50 > 0 and s.adx >= 18 and s.hist > 0 and s.roc10 > 0 and s.pdi >= s.mdi
+    if not (stacked and momentum):
+        return False, []
+    if s.rsi >= 68 or s.pct_b > 0.95:
+        return False, []
+    if s.regime == MILD_BULL and s.depth_atr < 0.5 and s.rsi > 62:
+        return False, []
+    reasons = [
+        f"trend rally: EMA stack bull, EMA50 {s.slope50:+.1%}, ADX {s.adx:.0f}, ROC10 {s.roc10:+.1%}",
+        f"MACD hist {s.hist:+.3f} positive, %b {s.pct_b:.2f}",
+    ]
+    return True, reasons
+
+
 def _near_support(s: Snapshot) -> Optional[str]:
     for name, lvl in (("EMA20", s.ema[20]), ("EMA50", s.ema[50]), ("lower Bollinger band", s.bb_lower),
                       ("EMA200", s.ema[200])):
@@ -108,7 +139,9 @@ def _near_support(s: Snapshot) -> Optional[str]:
 def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[PositionView] = None,
                  cooldown: bool = False) -> EntrySignal | Rejection:
     sym = s.symbol
-    factor, need, allowed = REGIME_RULES[s.regime]
+    rules = regime_rules(cfg)
+    factor, need, allowed = rules[s.regime]
+    aggressive = cfg.strategy_mode == "aggressive"
     need = max(1, need + cfg.extra_confirmations)
     if s.vol_shock:
         need += 1
@@ -128,21 +161,26 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     n = len(s.confirmations)
 
     kind, reasons = "INITIAL", []
+    trend, trend_reasons = _trend_rally(s, aggressive)
     if pos is None:
-        if s.pullback not in allowed:
+        if trend and s.pullback in allowed:
+            kind = "TREND_INITIAL"
+            reasons = trend_reasons
+        elif s.pullback not in allowed:
             return Rejection(sym, f"{s.pullback} is not a buyable setup in a {s.regime} market")
-        if s.depth_pct < prof.min_dip_pct / 100 or s.depth_atr < prof.min_dip_atr:
-            return Rejection(sym, f"pullback {s.depth_pct:.1%} ({s.depth_atr:.1f} ATR) from 20d high {s.swing_high:.2f} "
-                                  f"is shallower than {prof.min_dip_pct}% / {prof.min_dip_atr} ATR")
-        if s.rsi_min5 > prof.rsi_dip:
-            return Rejection(sym, f"RSI did not dip (5-day low {s.rsi_min5:.0f} > {prof.rsi_dip:.0f})")
-        sup = _near_support(s)
-        if sup is None:
-            return Rejection(sym, f"pullback low {s.pullback_low:.2f} is not near EMA20/50/200 or the lower band")
-        if s.regime == SIDEWAYS and s.pullback_low > s.bb_lower + 0.5 * s.atr and s.rsi_min5 > 40:
-            return Rejection(sym, "sideways market: dip did not reach the lower band / RSI 40")
-        reasons += [f"pullback {s.depth_pct:.1%} ({s.depth_atr:.1f} ATR) from 20d high {s.swing_high:.2f}; {sup}",
-                    f"RSI dipped to {s.rsi_min5:.0f}, now {s.rsi:.0f}"]
+        else:
+            if s.depth_pct < prof.min_dip_pct / 100 or s.depth_atr < prof.min_dip_atr:
+                return Rejection(sym, f"pullback {s.depth_pct:.1%} ({s.depth_atr:.1f} ATR) from 20d high {s.swing_high:.2f} "
+                                      f"is shallower than {prof.min_dip_pct}% / {prof.min_dip_atr} ATR")
+            if s.rsi_min5 > prof.rsi_dip:
+                return Rejection(sym, f"RSI did not dip (5-day low {s.rsi_min5:.0f} > {prof.rsi_dip:.0f})")
+            sup = _near_support(s)
+            if sup is None:
+                return Rejection(sym, f"pullback low {s.pullback_low:.2f} is not near EMA20/50/200 or the lower band")
+            if s.regime == SIDEWAYS and s.pullback_low > s.bb_lower + 0.5 * s.atr and s.rsi_min5 > 40:
+                return Rejection(sym, "sideways market: dip did not reach the lower band / RSI 40")
+            reasons += [f"pullback {s.depth_pct:.1%} ({s.depth_atr:.1f} ATR) from 20d high {s.swing_high:.2f}; {sup}",
+                        f"RSI dipped to {s.rsi_min5:.0f}, now {s.rsi:.0f}"]
     else:
         if s.close <= pos.stop + 0.5 * s.atr:
             return Rejection(sym, f"price {s.close:.2f} too close to the stop {pos.stop:.2f}")
@@ -156,13 +194,15 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
                            "pullback bought back")
         else:
             return Rejection(sym, "no new favourable price for the next tranche (no blind averaging)")
-    if s.rsi > 62:
-        return Rejection(sym, f"RSI {s.rsi:.0f} already extended (> 62)")
+    rsi_cap = 68 if kind == "TREND_INITIAL" else 62
+    if s.rsi > rsi_cap:
+        return Rejection(sym, f"RSI {s.rsi:.0f} already extended (> {rsi_cap})")
     if n < need:
         return Rejection(sym, f"only {n} reversal confirmation(s), need {need} in {s.regime}"
                               + (" (+1 for volatility shock)" if s.vol_shock else ""))
     limit = round(s.close * (1 + cfg.entry_headroom_pct / 100), 2)
-    structure = s.pullback_low - 0.5 * s.atr
+    structure = (min(s.pullback_low, s.ema[20] - 0.5 * s.atr) if kind == "TREND_INITIAL"
+                 else s.pullback_low - 0.5 * s.atr)
     dist = limit - structure
     if dist > prof.stop_atr_max * s.atr:
         return Rejection(sym, f"stop below the pullback low would be {dist / s.atr:.1f} ATR away "
@@ -184,7 +224,7 @@ def size(sig: EntrySignal, prof: Profile, cfg: EtfConfig, equity: float, cash: f
          exposure: dict, pos: Optional[PositionView], vol_shock: bool = False) -> Sizing:
     """Quantity for this tranche. exposure: symbol -> current market value held."""
     z = Sizing()
-    factor = REGIME_RULES[sig.regime][0] * (0.5 if vol_shock else 1.0)
+    factor = regime_rules(cfg)[sig.regime][0] * (0.5 if vol_shock else 1.0)
     slip = prof.slippage_bps / 1e4
     eff = sig.limit * (1 + slip)
     planned = pos.planned_value if pos else equity * min(prof.max_exposure_pct, cfg.max_alloc_pct) / 100 * factor
@@ -259,7 +299,8 @@ def review(pos: PositionView, s: Snapshot, prof: Profile, cfg: EtfConfig) -> Rev
             r.notes.append(f"profit lock stop {lock:.2f}")
     if s.regime == STRONG_BEAR:
         r.exit_reason = "TREND_CHANGE"
-    elif cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev:
+    elif cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev \
+            and not (cfg.strategy_mode == "aggressive" and strong):
         r.exit_reason = "RSI_OVERBOUGHT"
     elif cfg.exit_on_macd_cross and pnl > be and s.macd < s.macd_signal and s.hist_prev >= 0:
         r.exit_reason = "MACD_BEARISH_CROSS"
