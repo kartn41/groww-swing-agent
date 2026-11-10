@@ -24,6 +24,7 @@ class PaperBroker(Broker):
         self.stop_status: dict[str, str] = {}
         self.stops_unavailable = False
         self.stop_calls: list[tuple] = []
+        self.cash = 1e9
 
     def place_order(self, req: OrderRequest) -> OrderStatus:
         self.place_calls += 1
@@ -95,6 +96,11 @@ class PaperBroker(Broker):
         self.stop_calls.append(("cancel", stop_id))
         self.stop_status[stop_id] = "CANCELLED"
         return self.get_stop(stop_id)
+
+    def available_cash(self) -> float:
+        if self.lookup_unavailable:
+            raise BrokerUnavailable("simulated funds-API outage")
+        return self.cash
 
     def set_position(self, symbol: str, qty: int) -> None:      # test hook: simulate fills/sells
         self._pos[symbol] = qty

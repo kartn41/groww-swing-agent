@@ -1,0 +1,12 @@
+[Unit]
+Description=GoldBEES/SilverBEES checks every 15 minutes, 09:30-15:20 IST on weekdays (sudden fall, stop, target, buys)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30,45:00 Asia/Kolkata
+OnCalendar=Mon..Fri *-*-* 10..14:00/15:00 Asia/Kolkata
+OnCalendar=Mon..Fri *-*-* 15:00,10,20:00 Asia/Kolkata
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -39,3 +39,28 @@ def relative_volume(vol: pd.Series, n: int = 20) -> pd.Series:
 
 def roc(close: pd.Series, n: int) -> pd.Series:
     return close / close.shift(n) - 1
+
+
+def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+    line = ema(close, fast) - ema(close, slow)
+    sig = line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return pd.DataFrame({"macd": line, "signal": sig, "hist": line - sig})
+
+
+def adx(df: pd.DataFrame, n: int = 14) -> pd.DataFrame:
+    """Wilder's ADX with +DI / -DI."""
+    up, dn = df["high"].diff(), -df["low"].diff()
+    plus_dm = up.where((up > dn) & (up > 0), 0.0)
+    minus_dm = dn.where((dn > up) & (dn > 0), 0.0)
+    tr = _wilder(true_range(df), n)
+    pdi = 100 * _wilder(plus_dm, n) / tr
+    mdi = 100 * _wilder(minus_dm, n) / tr
+    dx = (100 * (pdi - mdi).abs() / (pdi + mdi)).fillna(0.0)
+    return pd.DataFrame({"adx": _wilder(dx, n), "pdi": pdi, "mdi": mdi})
+
+
+def bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
+    mid = sma(close, n)
+    sd = close.rolling(n, min_periods=n).std(ddof=0)
+    up, lo = mid + k * sd, mid - k * sd
+    return pd.DataFrame({"mid": mid, "upper": up, "lower": lo, "pct_b": (close - lo) / (up - lo)})

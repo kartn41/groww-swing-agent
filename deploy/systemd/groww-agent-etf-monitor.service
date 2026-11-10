@@ -1,0 +1,13 @@
+[Unit]
+Description=groww-swing-agent GoldBEES/SilverBEES market-hours monitor (PAPER unless ETF live is explicitly armed)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python -m app.run etf-monitor
+TimeoutStartSec=240
+NoNewPrivileges=true
+PrivateTmp=true

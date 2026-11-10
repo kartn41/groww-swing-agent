@@ -122,7 +122,9 @@ class TestScheduler(unittest.TestCase):
         subprocess.run(["bash", "deploy/install_systemd.sh"], check=True, capture_output=True,
                        env={**os.environ, "DEST": dest, "NO_SYSTEMCTL": "1", "AGENT_DIR": "/home/trader/gsa"})
         files = sorted(os.listdir(dest))
-        self.assertEqual(files, ["groww-agent-daily.service", "groww-agent-daily.timer", "groww-agent-dashboard.service"])
+        self.assertEqual(files, ["groww-agent-daily.service", "groww-agent-daily.timer", "groww-agent-dashboard.service",
+                                 "groww-agent-etf-monitor.service", "groww-agent-etf-monitor.timer"])
+        self.assertNotIn("groww-agent-monitor.timer", files)          # the LIVE GTT monitor stays opt-in
         for f in files:
             t = Path(dest, f).read_text()
             self.assertNotIn("__", t)

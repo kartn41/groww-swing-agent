@@ -1,0 +1,125 @@
+"""GoldBEES / SilverBEES swing settings. Every number is a starting hypothesis to validate by backtest,
+not a proven value. All of them can be overridden from .env (ETF_<NAME>, ETF_<SYMBOL>_<NAME>)."""
+from __future__ import annotations
+import os
+from dataclasses import dataclass, field, fields, replace
+from datetime import time
+
+from app.config import CostModel
+
+SYMBOLS = ("GOLDBEES", "SILVERBEES")
+
+
+@dataclass(frozen=True)
+class Profile:
+    """Per-ETF behaviour. SilverBEES is more volatile: deeper dips, smaller size, tighter loss budget."""
+    symbol: str
+    max_exposure_pct: float          # of strategy equity held in this ETF
+    max_loss_pct: float              # loss at the stop for the whole position (all tranches), % of equity
+    min_dip_pct: float               # pullback from the 20-day high, %
+    min_dip_atr: float               # ... and in ATRs
+    rsi_dip: float                   # RSI must have dipped to <= this in the last 5 sessions
+    stop_atr_min: float
+    stop_atr_max: float
+    target_atr: float                # preferred target = max(preferred_target_pct, target_atr x ATR%)
+    trail_atr: float
+    sudden_drop_pct: float           # intraday fall from previous close / day high that forces a sale
+    sudden_drop_atr: float           # ... or this many ATRs, whichever is larger
+    max_hold_days: int
+    slippage_bps: float              # per side, includes half the bid-ask spread
+    max_spread_bps: float
+
+
+GOLD = Profile("GOLDBEES", max_exposure_pct=60.0, max_loss_pct=1.0, min_dip_pct=1.0, min_dip_atr=1.0,
+               rsi_dip=55.0, stop_atr_min=1.5, stop_atr_max=2.5, target_atr=2.0, trail_atr=1.5,
+               sudden_drop_pct=2.5, sudden_drop_atr=2.0, max_hold_days=25, slippage_bps=5.0, max_spread_bps=15.0)
+SILVER = Profile("SILVERBEES", max_exposure_pct=45.0, max_loss_pct=0.75, min_dip_pct=2.0, min_dip_atr=1.0,
+                 rsi_dip=52.0, stop_atr_min=1.5, stop_atr_max=2.25, target_atr=2.0, trail_atr=1.5,
+                 sudden_drop_pct=4.0, sudden_drop_atr=2.0, max_hold_days=20, slippage_bps=10.0, max_spread_bps=25.0)
+
+
+def etf_costs() -> CostModel:
+    """Gold/silver ETFs are not equity-oriented funds: no STT. Other delivery charges as for stocks.
+    Placeholder rates: verify against Groww's current charges page before trusting P&L."""
+    return CostModel(stt_pct=0.0)
+
+
+@dataclass(frozen=True)
+class EtfConfig:
+    symbols: str = "GOLDBEES,SILVERBEES"      # ETF_SYMBOLS=GOLDBEES to trade gold only
+    capital: float = 100000.0
+    max_alloc_pct: float = 100.0             # strategy capital that may ever be invested
+    max_combined_pct: float = 80.0           # both ETFs together (they are correlated)
+    tranche_weights: tuple = (0.4, 0.3, 0.3)
+    min_target_pct: float = 1.5
+    preferred_target_pct: float = 2.0
+    extended_target_pct: float = 2.5
+    min_net_rr: float = 0.8                  # net reward/risk at the preferred target; dip signals hit
+                                             # +2 ATR before -2 ATR ~3x as often (2021-24 GoldBEES study)
+    min_days_between_tranches: int = 2
+    add_gap_atr: float = 0.75                # a dip add needs price >= this many ATRs below the last tranche
+    daily_loss_limit_pct: float = 1.5
+    max_drawdown_pct: float = 8.0
+    cooldown_days: int = 3                   # no re-entry after a stop / sudden-drop exit
+    max_chase_pct: float = 0.3              # skip if the next open is this far above the limit
+    entry_headroom_pct: float = 0.0          # limit = signal close + this (a limit AT the close only fills
+                                             # when price falls back: adverse selection)
+    extra_confirmations: int = -1            # added to the per-regime requirement (may be negative)
+    exit_on_support_lost: bool = True
+    exit_on_macd_cross: bool = True
+    exit_on_rsi_overbought: bool = True
+    same_day_proceeds_pct: float = 0.0       # share of today's sale proceeds usable today (Groww: verify)
+    window_start: time = time(9, 45)
+    window_end: time = time(15, 0)
+    profiles: dict = field(default_factory=lambda: {"GOLDBEES": GOLD, "SILVERBEES": SILVER})
+    costs: CostModel = field(default_factory=etf_costs)
+
+    def profile(self, symbol: str) -> Profile:
+        return self.profiles[symbol]
+
+    @property
+    def symbol_list(self) -> list[str]:
+        return [x.strip().upper() for x in self.symbols.split(",") if x.strip()]
+
+
+def _cast(old, raw: str):
+    if isinstance(old, bool):
+        return raw.strip().lower() in ("1", "true", "on", "yes")
+    if isinstance(old, int):
+        return int(raw)
+    if isinstance(old, float):
+        return float(raw)
+    if isinstance(old, time):
+        h, m = raw.strip().split(":")
+        return time(int(h), int(m))
+    if isinstance(old, tuple):
+        return tuple(float(x) for x in raw.split(","))
+    return raw
+
+
+def load_etf_config(env=None) -> EtfConfig:
+    env = os.environ if env is None else env
+    base = EtfConfig()
+    kw = {}
+    for f in fields(EtfConfig):
+        if f.name in ("profiles", "costs"):
+            continue
+        raw = env.get(f"ETF_{f.name.upper()}")
+        if raw not in (None, ""):
+            kw[f.name] = _cast(getattr(base, f.name), raw)
+    profiles = {}
+    for sym, prof in base.profiles.items():
+        pk = {}
+        for f in fields(Profile):
+            raw = env.get(f"ETF_{sym}_{f.name.upper()}")
+            if f.name != "symbol" and raw not in (None, ""):
+                pk[f.name] = _cast(getattr(prof, f.name), raw)
+        profiles[sym] = replace(prof, **pk)
+    cfg = replace(base, profiles=profiles, **kw)
+    bad = [x for x in cfg.symbol_list if x not in SYMBOLS]
+    if bad or not cfg.symbol_list:
+        raise ValueError(f"ETF_SYMBOLS may only contain {SYMBOLS}, got {cfg.symbols!r}")
+    w = cfg.tranche_weights
+    if len(w) != 3 or abs(sum(w) - 1.0) > 1e-6 or min(w) <= 0:
+        raise ValueError(f"ETF_TRANCHE_WEIGHTS must be three positive numbers summing to 1, got {w}")
+    return cfg

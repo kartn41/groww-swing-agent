@@ -87,6 +87,18 @@ class GrowwBroker(Broker):
         except Exception as e:                     # incl. KeyError on unexpected payload shape
             raise BrokerUnavailable(f"positions unavailable: {e}") from e
 
+    def available_cash(self) -> float:
+        """UNVERIFIED field names (Groww margin API): equity_margin_details.cnc_balance_available.
+        Anything missing => unavailable, so no buy is sized on a guess."""
+        try:
+            r = self._g.get_available_margin_details(timeout=5)
+            v = float((r.get("equity_margin_details") or {})["cnc_balance_available"])
+        except Exception as e:
+            raise BrokerUnavailable(f"available funds unknown: {e}") from e
+        if v < 0:
+            raise BrokerUnavailable(f"negative available funds {v}")
+        return v
+
     def place_stop_protection(self, symbol: str, qty: int, stop_price: float, reference_id: str) -> str:
         """GTT: when LTP falls to trigger, a SELL limit slightly below it is placed.
         NOT a guaranteed exit: a gap-down can open below the limit and leave it unfilled."""

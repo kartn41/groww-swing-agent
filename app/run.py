@@ -12,6 +12,11 @@
   python -m app.run probe ADANIENT                read-only: show unusable candles Groww returns for one stock
   python -m app.run telegram-chatid               find your chat id (after messaging your bot)
   python -m app.run telegram-test                 send a test message
+GoldBEES / SilverBEES swing (app/etf):
+  python -m app.run etf-daily                     after the close: fetch ETF candles, review, plan next session
+  python -m app.run etf-monitor                   market hours (timer, every 15 min): sudden-fall/stop/target + buys
+  python -m app.run etf-status                    ETF account, tranches, open orders
+  python -m app.run etf-backtest --start 2021-01-01 --holdout 2024-07-01
 Paper commands refuse to run when GROWW_MODE=LIVE."""
 from __future__ import annotations
 import argparse
@@ -26,6 +31,7 @@ from app.config import DATA_DIR, Mode, PROJECT_ROOT, load_settings
 from app.env import load_env_file
 from app.execution.executor import kill_switch_active
 from app.logging_setup import setup_logging
+from app.etf.cli import add_parsers as etf_parsers, etf_eod, etf_enabled, etf_groww_symbols
 from app.notify import TelegramNotifier, find_chat_ids, format_daily
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -90,6 +96,10 @@ def _held_symbols() -> set[str]:
     return out
 
 
+def stock_swing_enabled() -> bool:
+    return os.environ.get("STOCK_SWING_ENABLED", "true").strip().lower() in ("1", "true", "on", "yes")
+
+
 def _bhavcopy_mode() -> bool:
     return os.environ.get("STOCK_SOURCE", "groww").strip().lower() == "bhavcopy"
 
@@ -128,7 +138,7 @@ def _sync_bhavcopy(store, stocks: list[str], now: datetime) -> dict:
     return sync_bhavcopy(store, src, stocks, days, joinable_after=until - timedelta(days=10))
 
 
-def _fetch() -> dict:
+def _fetch(include_stocks: bool = True) -> dict:
     import fcntl
     from app.data.groww_source import GrowwCandleSource, groww_client_from_env, sync_daily
     from app.data.store import CandleStore
@@ -139,10 +149,12 @@ def _fetch() -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise FetchBusy("another fetch is already running")
-        uni = _universe()
+        with_stocks = include_stocks and stock_swing_enabled()
+        uni = _universe() if with_stocks else []
         store = CandleStore(MARKET_DB)
         src = GrowwCandleSource(groww_client_from_env(), throttle_s=float(os.environ.get("GROWW_DATA_PACE", "0.6")))
-        stocks = sorted({gsym(c.symbol) for c in uni} | {gsym(x) for x in _held_symbols()})
+        held = {gsym(x) for x in _held_symbols()} if with_stocks else set()
+        stocks = sorted({gsym(c.symbol) for c in uni} | held | set(etf_groww_symbols()))
         symbols = [INDEX_SYMBOL] + stocks
         now = datetime.now(IST)
         b = None
@@ -370,7 +382,7 @@ def cmd_daily(args) -> int:
             now = datetime.now(IST)
             store = CandleStore(MARKET_DB)
             have_today = store.last_date(INDEX_SYMBOL) == now.date() and \
-                (not _bhavcopy_mode() or _stocks_ready(store, now.date()))
+                (not _bhavcopy_mode() or not stock_swing_enabled() or _stocks_ready(store, now.date()))
             if have_today or now.weekday() >= 5 or now.time() < FINAL_AFTER or attempt == retries:
                 break
             log.info("today's NIFTY or stock candles for %s not available yet; retrying in %.0fs", now.date(), wait)
@@ -381,10 +393,18 @@ def cmd_daily(args) -> int:
         if now.weekday() < 5 and now.time() >= FINAL_AFTER and notifier:
             if store.last_date(INDEX_SYMBOL) != now.date():
                 notifier.send(f"No NIFTY candle for {now.date()}: market holiday or data delay. Nothing processed for today.")
-            elif _bhavcopy_mode() and not _stocks_ready(store, now.date()):
+            elif _bhavcopy_mode() and stock_swing_enabled() and not _stocks_ready(store, now.date()):
                 notifier.send(f"Stock candles for {now.date()} are not in yet (NSE bhavcopy not published or not "
                               "downloaded). Today is left for the next run, which catches it up.")
-        rc = catch_up(settings, _capital(None), notifier, now)
+        rc = catch_up(settings, _capital(None), notifier, now) if stock_swing_enabled() else 0
+        if etf_enabled():
+            try:
+                rc = max(rc, etf_eod(now, notifier))
+            except Exception as e:
+                log.exception("ETF end-of-day failed")
+                if notifier:
+                    notifier.alert(f"ETF end-of-day FAILED: {type(e).__name__}. Check logs/agent.log.")
+                rc = 1
         _heartbeat()
         return rc
     except Exception as e:
@@ -562,7 +582,10 @@ def main(argv=None) -> int:
     bt.add_argument("--fold-months", type=int, default=6)
     bt.add_argument("--capital", type=float)
     bt.add_argument("--quick", action="store_true", help="skip sensitivity and per-strategy runs")
+    etf_cmds = etf_parsers(sub)
     a = p.parse_args(argv)
+    if a.cmd in etf_cmds:
+        return etf_cmds[a.cmd](a)
     return {"fetch": cmd_fetch, "paper": cmd_paper, "status": cmd_status, "daily": cmd_daily,
             "backtest": cmd_backtest, "probe": cmd_probe, "dashboard": cmd_dashboard, "monitor": cmd_monitor,
             "telegram-test": cmd_telegram_test, "telegram-chatid": cmd_telegram_chatid}[a.cmd](a)

@@ -77,6 +77,11 @@ class Broker(ABC):
     def place_stop_protection(self, symbol: str, qty: int, stop_price: float,
                               reference_id: str) -> str: ...
 
+    def available_cash(self) -> float:
+        """Cash usable for a new CNC buy right now (excludes unsettled proceeds the broker does not allow).
+        Raise BrokerUnavailable when unknown."""
+        raise NotImplementedError
+
     # ---- broker-side stop (GTT) management; implemented by brokers that support it ----
     def get_stop(self, stop_id: str) -> Optional[StopStatus]:
         """StopStatus, None if definitively unknown to the broker; raise BrokerUnavailable on failure."""

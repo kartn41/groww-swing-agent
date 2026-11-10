@@ -245,3 +245,41 @@ were slightly positive. Volume only added to the pullback score and never blocke
 - The daily Telegram report adds the capital used (invested vs cash), each open position's value as a share of
   equity with its open profit/loss, every stock sold that day with its net % after costs, and running stats
   for all closed trades (win rate, average win %, average loss %, best and worst).
+
+## GoldBEES / SilverBEES swing strategy (`app/etf/`, paper by default)
+Long-only CNC delivery in GOLDBEES and SILVERBEES only, using limit orders and tracked in its own ledger
+(`data/etf_paper.db`, or `data/etf_live.db` in live mode). The stock strategy is unchanged; set
+`STOCK_SWING_ENABLED=false` to run only the ETFs.
+- End of day (inside `daily`, or on its own with `python -m app.run etf-daily`): daily indicators (EMA 5/9/20/50/200,
+  ADX, RSI, MACD, ROC, ATR, Bollinger Bands, volume vs its 20-day average). The day is labelled with one of
+  5 regimes and the dip with one of 4 types (healthy correction, pullback in uptrend, strong bearish momentum,
+  possible reversal). A dip alone never triggers a buy: it also needs RSI to have dipped, price near support,
+  and reversal confirmations (more of them as the regime weakens). The two ETFs are ranked, and if neither
+  qualifies the money stays in cash.
+- Buys come in 3 tranches (40/30/30%). A further tranche is added only on a new confirmed signal at least
+  0.75 ATR lower (or on a confirmed continuation), and never in bearish regimes. The weighted average is
+  recomputed after every fill. Before every order, the expected profit at the 2% target must beat the stop
+  loss after all charges (no STT on these ETFs), by a net reward/risk of at least 0.8.
+- Exits: stop, trailing stop, the 1.5/2/2.5%+ targets (extended only with a profit lock), trend change, RSI
+  overbought with momentum fading, MACD bearish cross, lost support, and a time stop.
+- `etf-monitor` (systemd timer, 09:30-15:20 IST every 15 minutes): **sudden-drop protection**. GoldBEES sells
+  on a 2.5% fall (SilverBEES 4%), or 2 ATR, from the previous close or the day's high; it also sells on the
+  stop or trailing stop, and at targets. Planned buys go only between 09:45 and 15:00, and only after
+  confirmation on the 1-hour and 15-minute candles, with a spread check, a funds check and idempotent
+  reference IDs. Unfilled buys are cancelled at 15:00. Units bought today are never sold that day.
+- `etf-status`, `etf-backtest --start 2021-01-01 --holdout 2024-07-01 [--telegram]`. The backtest runs per ETF
+  and combined, with a holdout period, walk-forward folds and sensitivity variants.
+- Backtest (development period 2021-01 to 2024-06, parameters then locked; holdout 2024-07 to 2026-11):
+
+  | Run | Holdout result |
+  |---|---|
+  | GoldBEES | +10.1%, 23 trades, profit factor 3.47 |
+  | SilverBEES | -1.1%, profit factor 0.72 |
+  | Combined | +9.0%, max drawdown 4.1%, Sharpe 1.3 |
+  | Buy-and-hold | +99.5%, max drawdown -41.7% |
+
+  Weak points: on average only 5-7% of capital is invested, only 3 of 7 walk-forward folds were profitable,
+  the confidence interval for expectancy includes zero, and with 3x slippage it breaks even.
+- Live ETF orders need GROWW_MODE=LIVE, `data/LIVE_ARMED` AND `ETF_LIVE_ENABLED=true`. Not verified
+  against the real Groww API: the cash field (`cnc_balance_available`) and the quote depth fields. Both
+  fail closed (no order) if they are missing.

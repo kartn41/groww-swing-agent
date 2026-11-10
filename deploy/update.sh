@@ -20,7 +20,7 @@ ZIP_DIR="${ZIP_DIR:-/tmp}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/groww-agent-update.lock}"
 WAIT_SECONDS="${WAIT_SECONDS:-300}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
-SMOKE_TESTS="${SMOKE_TESTS:-tests.test_core tests.test_review_fixes tests.test_monitor tests.test_foundation tests.test_notify tests.test_events tests.test_strategies_more tests.test_bhavcopy}"
+SMOKE_TESTS="${SMOKE_TESTS:-tests.test_core tests.test_review_fixes tests.test_monitor tests.test_foundation tests.test_notify tests.test_events tests.test_strategies_more tests.test_bhavcopy tests.test_etf}"
 KEEP=3
 ZIP="" DRY=0 FORCE=0 TESTS=smoke INSTALL_UNITS=0
 
@@ -58,7 +58,7 @@ exec > >(tee -a "$LOG") 2>&1
 TS="$(date +%Y%m%d-%H%M%S)"
 say "=== update-agent ${TS} (user ${AGENT_USER}) ==="
 
-UNITS=(groww-agent-daily.timer groww-agent-dashboard.service groww-agent-monitor.timer)
+UNITS=(groww-agent-daily.timer groww-agent-dashboard.service groww-agent-monitor.timer groww-agent-etf-monitor.timer)
 ENABLED=() BACKUP="" STAGE="" SWAPPED=0 STOPPED=0 UNITS_BACKUP=""
 
 # ---------------------------------------------------------------- pre-flight (changes nothing)
@@ -114,7 +114,7 @@ for u in "${UNITS[@]}"; do
 done
 if [[ -n "${NO_SYSTEMCTL:-}" || -n "${ASSUME_ENABLED:-}" ]]; then read -r -a ENABLED <<<"${ASSUME_ENABLED:-}"; fi
 if (( INSTALL_UNITS )); then
-  for u in groww-agent-daily.timer groww-agent-dashboard.service; do
+  for u in groww-agent-daily.timer groww-agent-dashboard.service groww-agent-etf-monitor.timer; do
     [[ " ${ENABLED[*]:-} " == *" $u "* ]] || ENABLED+=("$u")
   done
 fi
@@ -137,7 +137,7 @@ restart_services() {
 
 rollback() {
   warn "update failed: restoring the previous version"
-  sysd stop groww-agent-daily.timer groww-agent-monitor.timer >/dev/null 2>&1 || true
+  sysd stop groww-agent-daily.timer groww-agent-monitor.timer groww-agent-etf-monitor.timer >/dev/null 2>&1 || true
   if [[ -n "$BACKUP" && -d "$BACKUP" ]]; then
     [[ -d "$APP" ]] && mv "$APP" "${APP}.failed-${TS}"
     mv "$BACKUP" "$APP"
@@ -163,7 +163,7 @@ trap on_exit EXIT
 
 # ---------------------------------------------------------------- stop the agent
 say "--- stopping the agent"
-sysd stop groww-agent-daily.timer groww-agent-monitor.timer >/dev/null 2>&1 || true     # no new runs
+sysd stop groww-agent-daily.timer groww-agent-monitor.timer groww-agent-etf-monitor.timer >/dev/null 2>&1 || true     # no new runs
 STOPPED=1
 waited=0
 while pgrep -f "${PROCS} (daily|monitor|fetch|paper|backtest)" >/dev/null 2>&1 && (( waited < WAIT_SECONDS )); do

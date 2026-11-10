@@ -203,7 +203,8 @@ class TestRunner(unittest.TestCase):
              mock.patch("app.data.groww_source.sync_daily", fake_sync), \
              mock.patch.object(run, "_sync_bhavcopy", lambda store, stocks, now: seen.setdefault("stocks", stocks) and fake_b):
             s = run._fetch()
-        self.assertNotIn(INDEX_SYMBOL, seen["caps"]); self.assertEqual(len(seen["caps"]), 50)
+        self.assertNotIn(INDEX_SYMBOL, seen["caps"]); self.assertEqual(len(seen["caps"]), 52)  # 50 stocks + 2 ETFs
+        self.assertIn("NSE-GOLDBEES", seen["caps"]); self.assertIn("NSE-SILVERBEES", seen["stocks"])
         self.assertEqual(set(seen["caps"].values()), {date(2025, 10, 4)})
         self.assertIn("bhavcopy 2026-10-27", s["errors"]); self.assertTrue(s["aborted"])  # reaches the Telegram alert
 
