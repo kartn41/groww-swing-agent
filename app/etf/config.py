@@ -58,6 +58,7 @@ class EtfConfig:
     core_pct_mild: float = 40.0                # momentum: target when MILD_BULL
     core_pct_sideways: float = 30.0            # momentum: still hold a slice when trend is chopping but not bearish
     momentum_chase_pct: float = 3.5            # momentum: buy limit may be this far above the signal close (gap-up days)
+    near_200_tolerance_pct: float = 3.0        # momentum: within this % below EMA200 still counts as correction not hard bear
     rebound_drop_pct: float = 1.2              # momentum: buy green day after prior session fell at least this much
     momentum_day_pct: float = 1.0              # momentum: add on session after prior day rose at least this much
     symbols: str = "GOLDBEES,SILVERBEES"      # ETF_SYMBOLS=GOLDBEES to trade gold only

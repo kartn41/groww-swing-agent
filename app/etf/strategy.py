@@ -43,10 +43,11 @@ def regime_rules(cfg: EtfConfig):
 
 
 def trading_regime(s: Snapshot, cfg: EtfConfig) -> str:
-    """Momentum entries: a pullback below short EMAs while still above the 200d trend is a correction, not a no-buy bear."""
+    """Momentum entries: a pullback below short EMAs while still near/above the 200d trend is a correction, not a no-buy bear."""
     if cfg.strategy_mode != "momentum":
         return s.regime
-    if s.close <= s.ema[200]:
+    floor = s.ema[200] * (1 - cfg.near_200_tolerance_pct / 100)
+    if s.close < floor:
         return s.regime
     if s.regime == STRONG_BEAR:
         if s.close > s.ema[50] and s.slope50 > 0 and s.hist > 0:
