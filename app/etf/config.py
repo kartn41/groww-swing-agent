@@ -53,7 +53,9 @@ def etf_costs() -> CostModel:
 
 @dataclass(frozen=True)
 class EtfConfig:
-    strategy_mode: str = "balanced"            # balanced | aggressive | momentum | conservative (ETF_STRATEGY_MODE)
+    strategy_mode: str = "balanced"            # balanced | aggressive | momentum | conservative | swing
+    min_hold_days: int = 0                     # swing: no RSI/MACD/support exits before this many sessions
+    max_hold_days: int = 0                     # swing: force exit after this (0 = use profile max_hold_days only)
     core_pct_strong: float = 55.0              # momentum: target % of equity in ETF when STRONG_BULL
     core_pct_mild: float = 40.0                # momentum: target when MILD_BULL
     core_pct_sideways: float = 30.0            # momentum: still hold a slice when trend is chopping but not bearish
@@ -138,8 +140,8 @@ def load_etf_config(env=None) -> EtfConfig:
     if len(w) != 3 or abs(sum(w) - 1.0) > 1e-6 or min(w) <= 0:
         raise ValueError(f"ETF_TRANCHE_WEIGHTS must be three positive numbers summing to 1, got {w}")
     mode = str(cfg.strategy_mode or "balanced").strip().lower()
-    if mode not in ("balanced", "aggressive", "momentum", "conservative"):
-        raise ValueError(f"ETF_STRATEGY_MODE must be balanced, aggressive, momentum, or conservative, "
+    if mode not in ("balanced", "aggressive", "momentum", "conservative", "swing"):
+        raise ValueError(f"ETF_STRATEGY_MODE must be balanced, aggressive, momentum, conservative, or swing, "
                          f"got {cfg.strategy_mode!r}")
     if mode in ("aggressive", "momentum"):
         aggr_profiles = {}
@@ -181,5 +183,31 @@ def load_etf_config(env=None) -> EtfConfig:
             max_drawdown_pct=5.0 if cfg.max_drawdown_pct == 8.0 else cfg.max_drawdown_pct,
             daily_loss_limit_pct=1.2 if cfg.daily_loss_limit_pct == 1.5 else cfg.daily_loss_limit_pct,
             momentum_chase_pct=1.5 if cfg.momentum_chase_pct == 3.5 else cfg.momentum_chase_pct,
+        )
+    if mode == "swing":
+        swing_prof = {}
+        for sym, prof in cfg.profiles.items():
+            pk = {"max_hold_days": 45 if sym == "GOLDBEES" else 35}
+            if sym == "GOLDBEES":
+                pk.update(max_loss_pct=0.85, target_atr=2.0, trail_atr=1.25)
+            swing_prof[sym] = replace(prof, **pk)
+        cfg = replace(
+            cfg,
+            strategy_mode="swing",
+            profiles=swing_prof,
+            min_hold_days=7 if cfg.min_hold_days == 0 else cfg.min_hold_days,
+            max_hold_days=45 if cfg.max_hold_days == 0 else cfg.max_hold_days,
+            min_target_pct=2.0 if cfg.min_target_pct == 1.5 else cfg.min_target_pct,
+            preferred_target_pct=2.0,
+            extended_target_pct=2.5,
+            min_net_rr=1.0 if cfg.min_net_rr == 0.8 else cfg.min_net_rr,
+            min_days_between_tranches=7 if cfg.min_days_between_tranches == 2 else cfg.min_days_between_tranches,
+            max_combined_pct=60.0 if cfg.max_combined_pct == 80.0 else cfg.max_combined_pct,
+            max_drawdown_pct=5.0 if cfg.max_drawdown_pct == 8.0 else cfg.max_drawdown_pct,
+            daily_loss_limit_pct=1.0 if cfg.daily_loss_limit_pct == 1.5 else cfg.daily_loss_limit_pct,
+            core_pct_strong=0.0,
+            core_pct_mild=0.0,
+            core_pct_sideways=0.0,
+            extra_confirmations=0 if cfg.extra_confirmations == -1 else cfg.extra_confirmations,
         )
     return replace(cfg, strategy_mode=mode)

@@ -313,6 +313,8 @@ def entry_signal(s: Snapshot, prof: Profile, cfg: EtfConfig, pos: Optional[Posit
     if pos is not None:
         stop = round(min(stop, pos.stop), 2)
     t = targets_for(s, prof, cfg)
+    if cfg.strategy_mode == "swing" and t.preferred < cfg.preferred_target_pct / 100 - 1e-6:
+        return Rejection(sym, f"volatility too low for a {cfg.preferred_target_pct}% swing (need wider ATR or skip)")
     rr = t.preferred * limit / (limit - stop)
     score = round(100 * (0.4 * min(rr / 2, 1.0) + 0.3 * min(n / 6, 1.0) + 0.2 * REGIME_WEIGHT.get(tr, 0.5)
                          + 0.1 * min(s.adx / 30, 1.0)), 1)
@@ -432,22 +434,26 @@ def review(pos: PositionView, s: Snapshot, prof: Profile, cfg: EtfConfig) -> Rev
         if lock > r.stop:
             r.stop = lock
             r.notes.append(f"profit lock stop {lock:.2f}")
+    hold_min = cfg.min_hold_days
+    hold_max = cfg.max_hold_days or prof.max_hold_days
+    soft = hold_min <= 0 or pos.sessions_held >= hold_min
     if s.regime == STRONG_BEAR:
         r.exit_reason = "TREND_CHANGE"
-    elif cfg.strategy_mode == "momentum" and s.regime == MILD_BEAR:
+    elif soft and cfg.strategy_mode == "momentum" and s.regime == MILD_BEAR:
         r.exit_reason = "TREND_CHANGE"
-    elif cfg.strategy_mode == "conservative" and s.regime == MILD_BEAR and s.close < s.ema[200]:
+    elif soft and cfg.strategy_mode in ("conservative", "swing") and s.regime == MILD_BEAR and s.close < s.ema[200]:
         r.exit_reason = "TREND_CHANGE"
-    elif cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev \
+    elif soft and cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev \
             and not (cfg.strategy_mode in ("aggressive", "momentum") and strong):
         r.exit_reason = "RSI_OVERBOUGHT"
-    elif cfg.exit_on_macd_cross and pnl > be and s.macd < s.macd_signal and s.hist_prev >= 0:
+    elif soft and cfg.exit_on_macd_cross and pnl > be and s.macd < s.macd_signal and s.hist_prev >= 0:
         r.exit_reason = "MACD_BEARISH_CROSS"
-    elif cfg.exit_on_support_lost and pnl < 0 and pos.sessions_held >= 3 and s.close < s.ema[9] and s.close < s.ema[20] and s.hist < 0 \
+    elif soft and cfg.exit_on_support_lost and pnl < 0 and pos.sessions_held >= max(3, hold_min) \
+            and s.close < s.ema[9] and s.close < s.ema[20] and s.hist < 0 \
             and s.close < s.pullback_low + 0.25 * s.atr:
         r.exit_reason = "SUPPORT_LOST"
-    elif pos.sessions_held >= prof.max_hold_days and pnl < t.minimum:
-        r.exit_reason = "TIME_STOP"
+    elif pos.sessions_held >= hold_max:
+        r.exit_reason = "TIME_STOP" if pnl < t.minimum else "TIME_TAKE"
     return r
 
 

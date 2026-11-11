@@ -592,6 +592,12 @@ class Config(unittest.TestCase):
         self.assertEqual(c.min_net_rr, 0.65)
         self.assertGreater(c.profile("GOLDBEES").max_exposure_pct, 80)
 
+    def test_swing_mode_preset(self):
+        c = load_etf_config({"ETF_STRATEGY_MODE": "swing"})
+        self.assertEqual((c.strategy_mode, c.min_hold_days, c.max_hold_days, c.min_target_pct, c.min_net_rr),
+                         ("swing", 7, 45, 2.0, 1.0))
+        self.assertEqual(c.profile("GOLDBEES").max_hold_days, 45)
+
     def test_conservative_mode_preset(self):
         c = load_etf_config({"ETF_STRATEGY_MODE": "conservative"})
         self.assertEqual(c.strategy_mode, "conservative")
