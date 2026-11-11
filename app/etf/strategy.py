@@ -59,6 +59,8 @@ def trading_regime(s: Snapshot, cfg: EtfConfig) -> str:
 
 
 def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
+    if cfg.strategy_mode == "conservative":
+        return cfg.core_pct_strong / 100 if regime == STRONG_BULL else 0.0
     if cfg.strategy_mode != "momentum":
         return 0.0
     if regime == STRONG_BULL:
@@ -72,7 +74,7 @@ def core_target_fraction(regime: str, cfg: EtfConfig) -> float:
 
 def plan_limit(close: float, kind: str, cfg: EtfConfig) -> float:
     """Next-session buy limit. Core/top-ups use a wide cap for gap-up days; tactical entries use a smaller chase."""
-    if cfg.strategy_mode == "momentum" and kind == "CORE_TOPUP":
+    if cfg.strategy_mode in ("momentum", "conservative") and kind == "CORE_TOPUP":
         return round(close * (1 + cfg.momentum_chase_pct / 100), 2)
     if cfg.strategy_mode == "momentum" and kind in ("MOMENTUM_INITIAL", "REBOUND_INITIAL", "TREND_INITIAL"):
         return round(close * (1 + max(cfg.entry_headroom_pct, 1.0) / 100), 2)
@@ -430,7 +432,11 @@ def review(pos: PositionView, s: Snapshot, prof: Profile, cfg: EtfConfig) -> Rev
         if lock > r.stop:
             r.stop = lock
             r.notes.append(f"profit lock stop {lock:.2f}")
-    if s.regime == STRONG_BEAR or (cfg.strategy_mode == "momentum" and s.regime == MILD_BEAR):
+    if s.regime == STRONG_BEAR:
+        r.exit_reason = "TREND_CHANGE"
+    elif cfg.strategy_mode == "momentum" and s.regime == MILD_BEAR:
+        r.exit_reason = "TREND_CHANGE"
+    elif cfg.strategy_mode == "conservative" and s.regime == MILD_BEAR and s.close < s.ema[200]:
         r.exit_reason = "TREND_CHANGE"
     elif cfg.exit_on_rsi_overbought and pnl >= t.minimum and s.rsi >= 70 and s.rsi < s.rsi_prev \
             and not (cfg.strategy_mode in ("aggressive", "momentum") and strong):

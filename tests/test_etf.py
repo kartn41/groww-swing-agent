@@ -592,6 +592,13 @@ class Config(unittest.TestCase):
         self.assertEqual(c.min_net_rr, 0.65)
         self.assertGreater(c.profile("GOLDBEES").max_exposure_pct, 80)
 
+    def test_conservative_mode_preset(self):
+        c = load_etf_config({"ETF_STRATEGY_MODE": "conservative"})
+        self.assertEqual(c.strategy_mode, "conservative")
+        self.assertEqual(c.min_net_rr, 1.0)
+        self.assertEqual(c.core_pct_mild, 0.0)
+        self.assertEqual(c.max_drawdown_pct, 5.0)
+
     def test_momentum_rebound_and_core(self):
         from app.etf.strategy import core_target_fraction, size_core
         mom = load_etf_config({"ETF_STRATEGY_MODE": "momentum", "ETF_SYMBOLS": "GOLDBEES"})

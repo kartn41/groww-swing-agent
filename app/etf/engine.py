@@ -159,7 +159,7 @@ def end_of_day(d: date, ledger: EtfLedger, frames: dict, cfg: EtfConfig, kill_sw
                                                    f"target {target:.2f}")
 
     planned_syms = {o["symbol"] for o in res.new_orders}
-    if cfg.strategy_mode == "momentum" and not block:
+    if cfg.strategy_mode in ("momentum", "conservative") and not block:
         for sym, s in res.snapshots.items():
             if sym in res.exits_flagged or sym in planned_syms:
                 continue

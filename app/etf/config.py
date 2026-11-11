@@ -53,7 +53,7 @@ def etf_costs() -> CostModel:
 
 @dataclass(frozen=True)
 class EtfConfig:
-    strategy_mode: str = "balanced"            # balanced | aggressive | momentum (ETF_STRATEGY_MODE)
+    strategy_mode: str = "balanced"            # balanced | aggressive | momentum | conservative (ETF_STRATEGY_MODE)
     core_pct_strong: float = 55.0              # momentum: target % of equity in ETF when STRONG_BULL
     core_pct_mild: float = 40.0                # momentum: target when MILD_BULL
     core_pct_sideways: float = 30.0            # momentum: still hold a slice when trend is chopping but not bearish
@@ -138,8 +138,9 @@ def load_etf_config(env=None) -> EtfConfig:
     if len(w) != 3 or abs(sum(w) - 1.0) > 1e-6 or min(w) <= 0:
         raise ValueError(f"ETF_TRANCHE_WEIGHTS must be three positive numbers summing to 1, got {w}")
     mode = str(cfg.strategy_mode or "balanced").strip().lower()
-    if mode not in ("balanced", "aggressive", "momentum"):
-        raise ValueError(f"ETF_STRATEGY_MODE must be balanced, aggressive, or momentum, got {cfg.strategy_mode!r}")
+    if mode not in ("balanced", "aggressive", "momentum", "conservative"):
+        raise ValueError(f"ETF_STRATEGY_MODE must be balanced, aggressive, momentum, or conservative, "
+                         f"got {cfg.strategy_mode!r}")
     if mode in ("aggressive", "momentum"):
         aggr_profiles = {}
         for sym, balanced in (("GOLDBEES", GOLD), ("SILVERBEES", SILVER)):
@@ -168,4 +169,17 @@ def load_etf_config(env=None) -> EtfConfig:
             if env.get("ETF_EXIT_ON_RSI_OVERBOUGHT") in (None, ""):
                 mo["exit_on_rsi_overbought"] = False
             cfg = replace(cfg, **mo)
+    if mode == "conservative":
+        cfg = replace(
+            cfg,
+            strategy_mode="conservative",
+            core_pct_strong=30.0 if cfg.core_pct_strong == 55.0 else cfg.core_pct_strong,
+            core_pct_mild=0.0 if cfg.core_pct_mild == 40.0 else cfg.core_pct_mild,
+            core_pct_sideways=0.0 if cfg.core_pct_sideways == 30.0 else cfg.core_pct_sideways,
+            min_net_rr=1.0 if cfg.min_net_rr == 0.8 else cfg.min_net_rr,
+            max_combined_pct=60.0 if cfg.max_combined_pct == 80.0 else cfg.max_combined_pct,
+            max_drawdown_pct=5.0 if cfg.max_drawdown_pct == 8.0 else cfg.max_drawdown_pct,
+            daily_loss_limit_pct=1.2 if cfg.daily_loss_limit_pct == 1.5 else cfg.daily_loss_limit_pct,
+            momentum_chase_pct=1.5 if cfg.momentum_chase_pct == 3.5 else cfg.momentum_chase_pct,
+        )
     return replace(cfg, strategy_mode=mode)
